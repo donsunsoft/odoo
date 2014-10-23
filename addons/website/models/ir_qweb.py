@@ -53,22 +53,28 @@ class QWeb(orm.AbstractModel):
         'style',
     ]
 
-    def add_template(self, qcontext, name, node):
-        # preprocessing for multilang static urls
-        if request.website:
-            for tag, attr in self.URL_ATTRS.iteritems():
-                for e in node.iterdescendants(tag=tag):
-                    url = e.get(attr)
-                    if url:
-                        e.set(attr, qcontext.get('url_for')(url))
-        super(QWeb, self).add_template(qcontext, name, node)
+    CDN_TRIGGERS = {
+        'link':    'href',
+        'script':  'src',
+        'img':     'src',
+    }
 
-    def render_att_att(self, element, attribute_name, attribute_value, qwebcontext):
-        att, val = super(QWeb, self).render_att_att(element, attribute_name, attribute_value, qwebcontext)
+    def render_attribute(self, element, name, value, qwebcontext):
+        context = qwebcontext.context or {}
+        if not context.get('rendering_bundle'):
+            if name == self.URL_ATTRS.get(element.tag):
+                value = qwebcontext.get('url_for')(value)
+            if request and request.website and request.website.cdn_activated and name == self.CDN_TRIGGERS.get(element.tag):
+                value = request.website.get_cdn_url(value)
 
-        if request.website and att == self.URL_ATTRS.get(element.tag) and isinstance(val, basestring):
-            val = qwebcontext.get('url_for')(val)
-        return att, val
+        return super(QWeb, self).render_attribute(element, name, value, qwebcontext)
+
+    def render_tag_call_assets(self, element, template_attributes, generated_attributes, qwebcontext):
+        if request and request.website and request.website.cdn_activated:
+            if qwebcontext.context is None:
+                qwebcontext.context = {}
+            qwebcontext.context['url_for'] = request.website.get_cdn_url
+        return super(QWeb, self).render_tag_call_assets(element, template_attributes, generated_attributes, qwebcontext)
 
     def get_converter_for(self, field_type):
         return self.pool.get(
@@ -435,6 +441,9 @@ class RelativeDatetime(orm.AbstractModel):
 class Contact(orm.AbstractModel):
     _name = 'website.qweb.field.contact'
     _inherit = ['ir.qweb.field.contact', 'website.qweb.field.many2one']
+
+    def from_html(self, cr, uid, model, column, element, context=None):
+        return None
 
 class QwebView(orm.AbstractModel):
     _name = 'website.qweb.field.qweb'
