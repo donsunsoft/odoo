@@ -106,7 +106,7 @@ class Message(models.Model):
     display_name = fields.Char(string='Abstract', compute='_compute_display_name')
     size = fields.Integer(compute='_compute_size', search='_search_size')
     double_size = fields.Integer(compute='_compute_double_size')
-    discussion_name = fields.Char(related='discussion.name', readonly=True)
+    discussion_name = fields.Char(related='discussion.name')
 
     @api.one
     @api.constrains('author', 'discussion')
@@ -117,7 +117,7 @@ class Message(models.Model):
     @api.one
     @api.depends('author.name', 'discussion.name')
     def _compute_name(self):
-        self.name = "[%s] %s" % (self.discussion.name or '', self.author.name)
+        self.name = "[%s] %s" % (self.discussion.name or '', self.author.name or '')
 
     @api.one
     @api.depends('author.name', 'discussion.name', 'body')

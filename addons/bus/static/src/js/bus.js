@@ -14,7 +14,7 @@
         },
         start_polling: function(){
             if(!this.activated){
-                setTimeout(this.poll(), 1);
+                this.poll();
                 this.stop = false;
             }
         },
@@ -33,6 +33,8 @@
                     self.poll();
                 }
             }, function(unused, e) {
+                // no error popup if request is interrupted or fails for any reason
+                e.preventDefault();
                 // random delay to avoid massive longpolling
                 setTimeout(_.bind(self.poll, self), bus.ERROR_DELAY + (Math.floor((Math.random()*20)+1)*1000));
             });
