@@ -218,7 +218,7 @@ openerp.mail = function (session) {
 
             //formating and add some fields for render
             this.date = this.date ? session.web.str_to_datetime(this.date) : false;
-            this.display_date = this.date.toString('ddd MMM dd yyyy HH:mm');
+            this.display_date = moment(new Date(this.date)).format('ddd MMM DD YYYY LT');
             if (this.date && new Date().getTime()-this.date.getTime() < 7*24*60*60*1000) {
                 this.timerelative = $.timeago(this.date);
             }
@@ -369,6 +369,16 @@ openerp.mail = function (session) {
             this.is_log = false;
             this.recipients = [];
             this.recipient_ids = [];
+            session.web.bus.on('clear_uncommitted_changes', this, function(e) {
+                if (this.show_composer && !e.isDefaultPrevented()){
+                    if (!confirm(_t("You are currently composing a message, your message will be discarded.\n\nAre you sure you want to leave this page ?"))) {
+                        e.preventDefault();
+                    }
+                    else{
+                        this.on_cancel();
+                    }
+                }
+            });
         },
 
         start: function () {
@@ -652,8 +662,8 @@ openerp.mail = function (session) {
             if (self.flag_post) {
                 return;
             }
-            self.flag_post = true;
             if (this.do_check_attachment_upload() && (this.attachment_ids.length || this.$('textarea').val().match(/\S+/))) {
+                self.flag_post = true;
                 if (this.is_log) {
                     this.do_send_message_post([], this.is_log);
                 }
@@ -880,7 +890,11 @@ openerp.mail = function (session) {
             self.parent_thread.message_fetch(this.domain, this.context, false, function (arg, data) {
                 self.id = false;
                 // insert the message on dom after this message
-                self.parent_thread.switch_new_message( data, self.$el.parent() );
+                var element = self.$el;
+                if (self.thread_level === 0){
+                    element = element.parent();
+                }
+                self.parent_thread.switch_new_message(data, element);
                 self.animated_destroy(200);
             });
 
@@ -1458,7 +1472,7 @@ openerp.mail = function (session) {
         message_fetch: function (replace_domain, replace_context, ids, callback) {
             return this.ds_message.call('message_read', [
                     // ids force to read
-                    ids === false ? undefined : ids, 
+                    ids === false ? undefined : ids && ids.slice(0, this.options.fetch_limit),
                     // domain + additional
                     (replace_domain ? replace_domain : this.domain), 
                     // ids allready loaded
@@ -1468,7 +1482,8 @@ openerp.mail = function (session) {
                     // context + additional
                     (replace_context ? replace_context : this.context), 
                     // parent_id
-                    this.context.default_parent_id || undefined
+                    this.context.default_parent_id || undefined,
+                    this.options.fetch_limit,
                 ]).done(callback ? _.bind(callback, this, arguments) : this.proxy('switch_new_message')
                 ).done(this.proxy('message_fetch_set_read'));
         },
@@ -1738,6 +1753,7 @@ openerp.mail = function (session) {
                 'compose_as_todo' : false,
                 'readonly' : false,
                 'emails_from_on_composer': true,
+                'fetch_limit': 30   // limit of chatter messages
             }, this.action.params);
 
             this.action.params.help = this.action.help || false;
@@ -1746,7 +1762,6 @@ openerp.mail = function (session) {
         start: function (options) {
             this._super.apply(this, arguments);
             this.message_render();
-            this.bind_events();
         },
         
         /**
@@ -1789,12 +1804,6 @@ openerp.mail = function (session) {
 
         },
 
-        bind_events: function () {
-            $(document).scroll( _.bind(this.thread.on_scroll, this.thread) );
-            $(window).resize( _.bind(this.thread.on_scroll, this.thread) );
-            this.$el.resize( _.bind(this.thread.on_scroll, this.thread) );
-            window.setTimeout( _.bind(this.thread.on_scroll, this.thread), 500 );
-        },
     });
 
 
@@ -1948,6 +1957,7 @@ openerp.mail = function (session) {
                 'show_compact_message': this.action.params.view_mailbox ? false : 1,
                 'view_inbox': false,
                 'emails_from_on_composer': false,
+                'fetch_limit': 30   // allow inbox to load all children messages
             }, this.action.params);
         },
 
@@ -2050,4 +2060,33 @@ openerp.mail = function (session) {
 
     openerp.mail.suggestions(session, mail);        // import suggestion.js (suggestion widget)
 
+    /**
+     * ------------------------------------------------------------
+     * UserMenu
+     * ------------------------------------------------------------
+     *
+     * Add a link on the top user bar for write a full mail
+     */
+    session.web.ComposeMessageTopButton = session.web.Widget.extend({
+        template:'mail.compose_message_top_button',
+        events: {
+            "click": "on_compose_message",
+        },
+        on_compose_message: function (ev) {
+            ev.preventDefault();
+            var action = {
+                type: 'ir.actions.act_window',
+                res_model: 'mail.compose.message',
+                view_mode: 'form',
+                view_type: 'form',
+                views: [[false, 'form']],
+                target: 'new',
+                context: {},
+            };
+            session.client.action_manager.do_action(action);
+        },
+    });
+
+    // Put the ComposeMessageTopButton widget in the systray menu
+    session.web.SystrayItems.push(session.web.ComposeMessageTopButton);
 };

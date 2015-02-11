@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
 import copy
+import logging
 
 from lxml import etree, html
 
-from openerp import SUPERUSER_ID, tools
+from openerp import SUPERUSER_ID, api, tools
 from openerp.addons.website.models import website
 from openerp.http import request
 from openerp.osv import osv, fields
+
+_logger = logging.getLogger(__name__)
+
 
 class view(osv.osv):
     _inherit = "ir.ui.view"
@@ -16,13 +20,8 @@ class view(osv.osv):
         'website_meta_description': fields.text("Website meta description", size=160, translate=True),
         'website_meta_keywords': fields.char("Website meta keywords", translate=True),
         'customize_show': fields.boolean("Show As Optional Inherit"),
-        'website_id': fields.many2one('website',ondelete='cascade', string="Website"),
+        'website_id': fields.many2one('website', ondelete='cascade', string="Website"),
     }
-
-    _sql_constraints = [
-        ('key_website_id_uniq', 'unique(key, website_id)',
-            'Key must be unique per website.'),
-    ]
 
     _defaults = {
         'page': False,
@@ -50,10 +49,12 @@ class view(osv.osv):
           - but not the optional children of a non-enabled child
         * all views called from it (via t-call)
         """
+
         try:
             view = self._view_obj(cr, uid, view_id, context=context)
         except ValueError:
-            # Shall we log that ?
+            _logger.warning("Could not find view object with view_id '%s'" % (view_id))
+            # Shall we log that ? Yes, you should !
             return []
 
         while root and view.inherit_id:
@@ -96,10 +97,8 @@ class view(osv.osv):
         Model = self.pool[el.get('data-oe-model')]
         field = el.get('data-oe-field')
 
-        column = Model._all_columns[field].column
-        converter = self.pool['website.qweb'].get_converter_for(
-            el.get('data-oe-type'))
-        value = converter.from_html(cr, uid, Model, column, el)
+        converter = self.pool['website.qweb'].get_converter_for(el.get('data-oe-type'))
+        value = converter.from_html(cr, uid, Model, Model._fields[field], el)
 
         if value is not None:
             # TODO: batch writes?
@@ -148,9 +147,10 @@ class view(osv.osv):
             xml_id = super(view, self).get_view_id(cr, uid, xml_id, context=context)
         return xml_id
 
+    @api.cr_uid_ids_context
     def render(self, cr, uid, id_or_xml_id, values=None, engine='ir.qweb', context=None):
         if request and getattr(request, 'website_enabled', False):
-            engine='website.qweb'
+            engine = 'website.qweb'
 
             if isinstance(id_or_xml_id, list):
                 id_or_xml_id = id_or_xml_id[0]
@@ -233,4 +233,3 @@ class view(osv.osv):
         view = self.browse(cr, SUPERUSER_ID, res_id, context=context)
         if view.model_data_id:
             view.model_data_id.write({'noupdate': True})
-

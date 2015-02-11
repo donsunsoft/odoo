@@ -58,7 +58,6 @@ The Dashboard for the Sales Manager will include
     """,
     'author': 'OpenERP SA',
     'website': 'https://www.odoo.com/page/crm',
-    'images': ['images/Sale_order_line_to_invoice.jpeg','images/sale_order.jpeg','images/sales_analysis.jpeg'],
     'depends': ['sales_team','account_voucher', 'procurement', 'report'],
     'data': [
         'wizard/sale_make_invoice_advance.xml',
@@ -74,9 +73,11 @@ The Dashboard for the Sales Manager will include
         'sales_team_view.xml',
         'res_partner_view.xml',
         'report/sale_report_view.xml',
+        'report/invoice_report_view.xml',
         'edi/sale_order_action_data.xml',
         'res_config_view.xml',
         'views/report_saleorder.xml',
+        'views/sale.xml',
     ],
     'demo': ['sale_demo.xml'],
     'test': [
@@ -87,8 +88,8 @@ The Dashboard for the Sales Manager will include
         'test/delete_order.yml',
         'test/edi_sale_order.yml',
     ],
+    'css': ['static/src/css/sale.css'],
     'installable': True,
     'auto_install': False,
     'application': True,
 }
-# vim:expandtab:smartindent:tabstop=4:softtabstop=4:shiftwidth=4:

@@ -21,6 +21,7 @@
 
 from openerp.osv import fields, osv
 from openerp.tools.translate import _
+from openerp.exceptions import UserError
 
 
 class grant_badge_wizard(osv.TransientModel):
@@ -36,12 +37,11 @@ class grant_badge_wizard(osv.TransientModel):
     def action_grant_badge(self, cr, uid, ids, context=None):
         """Wizard action for sending a badge to a chosen user"""
 
-        badge_obj = self.pool.get('gamification.badge')
         badge_user_obj = self.pool.get('gamification.badge.user')
 
         for wiz in self.browse(cr, uid, ids, context=context):
             if uid == wiz.user_id.id:
-                raise osv.except_osv(_('Warning!'), _('You can not grant a badge to yourself'))
+                raise UserError(_('You can not grant a badge to yourself'))
 
             #create the badge
             values = {
@@ -51,6 +51,6 @@ class grant_badge_wizard(osv.TransientModel):
                 'comment': wiz.comment,
             }
             badge_user = badge_user_obj.create(cr, uid, values, context=context)
-            result = badge_obj._send_badge(cr, uid, badge_user, context=context)
+            result = badge_user_obj._send_badge(cr, uid, badge_user, context=context)
 
         return result

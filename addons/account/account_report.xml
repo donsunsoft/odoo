@@ -1,15 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <openerp>
     <data>
-        <report 
-            id="account_transfers"
-            model="account.transfer"
-            name="account.transfer"
-            string="Transfers"
-            xml="account/report/transfer.xml"
-            xsl="account/report/transfer.xsl"
-        />
-        
         <report
             auto="False"
             id="account_intracom"
@@ -62,7 +53,7 @@
             id="action_report_print_overdue"
             model="res.partner"
             report_type="qweb-pdf"
-            string="Overdue Payments"
+            string="Due Payments"
             name="account.report_overdue"
             file="account.report_overdue"
         />

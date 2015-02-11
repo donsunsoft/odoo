@@ -478,6 +478,11 @@ openerp.PropertiesMixin = _.extend({}, openerp.EventDispatcherMixin, {
             var tmp = self.__getterSetterInternalMap[key];
             if (tmp === val)
                 return;
+            if (self.field && self.field.type === 'float' && tmp && val){
+                var precision = self.field.digits ? self.field.digits[1] : 2;
+                if (openerp.web.float_is_zero(tmp - val, precision))
+                return;
+            }
             changed = true;
             self.__getterSetterInternalMap[key] = val;
             if (! options.silent)
@@ -688,7 +693,12 @@ openerp.Widget = openerp.Class.extend(openerp.PropertiesMixin, {
         var $oldel = this.$el;
         this.setElement($el);
         if ($oldel && !$oldel.is(this.$el)) {
-            $oldel.replaceWith(this.$el);
+            if ($oldel.length > 1) {
+                $oldel.wrapAll('<div/>');
+                $oldel.parent().replaceWith(this.$el);
+            } else {
+                $oldel.replaceWith(this.$el);
+            }
         }
         return this;
     },
@@ -783,6 +793,12 @@ openerp.Widget = openerp.Class.extend(openerp.PropertiesMixin, {
         if (selector === undefined)
             return this.$el;
         return this.$el.find(selector);
+    },
+    do_show: function () {
+        this.$el.show();
+    },
+    do_hide: function () {
+        this.$el.hide();
     },
     /**
      * Proxies a method of the object, in order to keep the right ``this`` on
@@ -1068,11 +1084,11 @@ openerp.Session = openerp.Class.extend(openerp.PropertiesMixin, {
     },
     check_session_id: function() {
         var self = this;
-        if (this.avoid_recursion || self.use_cors)
+        if (this.avoid_recursion)
             return $.when();
         if (this.session_id)
             return $.when(); // we already have the session id
-        if (this.override_session || ! this.origin_server) {
+        if (!this.use_cors && (this.override_session || ! this.origin_server)) {
             // If we don't use the origin server we consider we should always create a new session.
             // Even if some browsers could support cookies when using jsonp that behavior is
             // not consistent and the browser creators are tending to removing that feature.

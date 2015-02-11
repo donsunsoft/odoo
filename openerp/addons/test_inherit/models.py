@@ -69,4 +69,5 @@ class daughter(models.Model):
     # simply redeclare the field without adding any option
     template_id = fields.Many2one()
 
-# vim:expandtab:smartindent:tabstop=4:softtabstop=4:shiftwidth=4:
+    # change the default value of an inherited field
+    name = fields.Char(default='Baz')

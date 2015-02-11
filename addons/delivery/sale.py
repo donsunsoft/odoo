@@ -22,6 +22,7 @@
 import time
 from openerp.osv import fields, osv
 from openerp.tools.translate import _
+from openerp.exceptions import UserError
 
 
 class sale_order_line(osv.Model):
@@ -53,10 +54,6 @@ class sale_order(osv.Model):
                 result['value']['carrier_id'] = dtype
         return result
 
-    def _prepare_order_picking(self, cr, uid, order, context=None):
-        result = super(sale_order, self)._prepare_order_picking(cr, uid, order, context=context)
-        result.update(carrier_id=order.carrier_id.id)
-        return result
 
     def _delivery_unset(self, cr, uid, ids, context=None):
         sale_obj = self.pool['sale.order.line']
@@ -72,10 +69,10 @@ class sale_order(osv.Model):
         for order in self.browse(cr, uid, ids, context=context):
             grid_id = carrier_obj.grid_get(cr, uid, [order.carrier_id.id], order.partner_shipping_id.id)
             if not grid_id:
-                raise osv.except_osv(_('No Grid Available!'), _('No grid matching for this carrier!'))
+                raise UserError(_('No grid matching for this carrier!'))
 
             if order.state not in ('draft', 'sent'):
-                raise osv.except_osv(_('Order not in Draft State!'), _('The order state have to be draft to add delivery lines.'))
+                raise UserError(_('The order state have to be draft to add delivery lines.'))
 
             grid = grid_obj.browse(cr, uid, grid_id, context=context)
 
@@ -92,4 +89,4 @@ class sale_order(osv.Model):
                 'price_unit': grid_obj.get_price(cr, uid, grid.id, order, time.strftime('%Y-%m-%d'), context),
                 'tax_id': [(6, 0, taxes_ids)],
                 'is_delivery': True
-            })
+            }, context=context)

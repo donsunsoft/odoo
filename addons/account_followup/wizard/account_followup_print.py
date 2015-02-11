@@ -168,7 +168,7 @@ class account_followup_print(osv.osv_memory):
             if partner.max_followup_id.send_letter:
                 partner_ids_to_print.append(partner.id)
                 nbprints += 1
-                message = _("Follow-up letter of ") + "<I> " + partner.partner_id.latest_followup_level_id_without_lit.name + "</I>" + _(" will be sent")
+                message = "%s<I> %s </I>%s" % (_("Follow-up letter of "), partner.partner_id.latest_followup_level_id_without_lit.name, _(" will be sent"))
                 partner_obj.message_post(cr, uid, [partner.partner_id.id], body=message, context=context)
         if nbunknownmails == 0:
             resulttext += str(nbmails) + _(" email(s) sent")
@@ -318,6 +318,3 @@ class account_followup_print(osv.osv_memory):
                     partner_list.append(stat_line_id)
                 to_update[str(id)]= {'level': fups[followup_line_id][1], 'partner_id': stat_line_id}
         return {'partner_ids': partner_list, 'to_update': to_update}
-
-
-# vim:expandtab:smartindent:tabstop=4:softtabstop=4:shiftwidth=4:

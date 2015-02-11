@@ -19,17 +19,13 @@
 #
 ##############################################################################
 
-import random
 import openerp
-import json
 import openerp.addons.im_chat.im_chat
-import datetime
+import random
+import re
 
 from openerp.osv import osv, fields
 from openerp import tools
-from openerp import http
-from openerp.http import request
-from openerp.tools.misc import DEFAULT_SERVER_DATETIME_FORMAT
 
 
 class im_livechat_channel(osv.Model):
@@ -85,6 +81,31 @@ class im_livechat_channel(osv.Model):
                 "/im_livechat/support/%s/%i" % (cr.dbname, record.id)
         return res
 
+    def _compute_nbr_session(self, cr, uid, ids, name, arg, context=None):
+        res = {}
+        for record in self.browse(cr, uid, ids, context=context):
+            res[record.id] = len(record.session_ids)
+        return res
+
+    # RATING METHOD
+    def _compute_percentage_satisfaction(self, cr, uid, ids, name, arg, context=None):
+        res = {}
+        for record in self.browse(cr, uid, ids, context=context):
+            repartition = record.session_ids.rating_get_grades()
+            total = sum(repartition.values())
+            if total > 0:
+                happy = repartition['great']
+                res[record.id] = ((happy*100) / total) if happy > 0 else 0
+            else:
+                res[record.id] = -1
+        return res
+
+    def action_view_rating(self, cr, uid, ids, context=None):
+        channels = self.browse(cr, uid, ids, context=context)
+        action = self.pool['ir.actions.act_window'].for_xml_id(cr, uid, 'rating', 'action_view_rating', context=context)
+        action['domain'] = [('res_id', 'in', [s.id for s in channels.session_ids]), ('res_model', '=', 'im_chat.session')]
+        return action
+
     _columns = {
         'name': fields.char(string="Channel Name", size=200, required=True),
         'user_ids': fields.many2many('res.users', 'im_livechat_channel_im_user', 'channel_id', 'user_id', string="Users"),
@@ -114,6 +135,11 @@ class im_livechat_channel(osv.Model):
             help="Small-sized photo of the group. It is automatically "\
                  "resized as a 64x64px image, with aspect ratio preserved. "\
                  "Use this field anywhere a small image is required."),
+        'session_ids' : fields.one2many('im_chat.session', 'channel_id', 'Sessions'),
+        'nbr_session' : fields.function(_compute_nbr_session, type='integer', string='Number of session', store=False),
+        'rule_ids': fields.one2many('im_livechat.channel.rule','channel_id','Rules'),
+        # rating field
+        'rating_percentage_satisfaction' : fields.function(_compute_percentage_satisfaction, type='integer', string='% Happy', store=False, default=-1),
     }
 
     def _default_user_ids(self, cr, uid, context=None):
@@ -175,9 +201,46 @@ class im_livechat_channel(osv.Model):
         self.write(cr, uid, ids, {'user_ids': [(3, uid)]})
         return True
 
+
+class im_livechat_channel_rule(osv.Model):
+    _name = 'im_livechat.channel.rule'
+
+    _columns = {
+        'regex_url' : fields.char('URL Regex', help="Regular expression identifying the web page on which the rules will be applied."),
+        'action' : fields.selection([('display_button', 'Display the button'),('auto_popup','Auto popup'), ('hide_button', 'Hide the button')], 'Action', size=32, required=True,
+                                 help="Select 'Display the button' to simply display the chat button on the pages."\
+                                 " Select 'Auto popup' for to display the button, and automatically open the conversation window."\
+                                 " Select 'Hide the button' to hide the chat button on the pages."),
+        'auto_popup_timer' : fields.integer('Auto popup timer', help="Delay (in seconds) to automatically open the converssation window. Note : the selected action must be 'Auto popup', otherwise this parameter will not be take into account."),
+        'channel_id': fields.many2one('im_livechat.channel', 'Channel', help="The channel of the rule"),
+        'country_ids': fields.many2many('res.country', 'im_livechat_channel_country_rel', 'channel_id', 'country_id', 'Country', help="The actual rule will match only for this country. So if you set select 'Belgium' and 'France' and you set the action to 'Hide Buttun', this 2 country will not be see the support button for the specified URL. This feature requires GeoIP installed on your server."),
+        'sequence' : fields.integer('Matching order', help="Given the order to find a matching rule. If 2 rules are matching for the given url/country, the one with the lowest sequence will be chosen.")
+    }
+
+    _defaults = {
+        'auto_popup_timer': 0,
+        'action' : 'display_button',
+        'sequence' : 10,
+    }
+
+    _order = "sequence asc"
+
+    def match_rule(self, cr, uid, channel_id, url, country_id=False, context=None):
+        """ determine if a rule of the given channel match with the given url """
+        domain = [('channel_id', '=', channel_id)]
+        if country_id: # don't include the country in the research if geoIP is not installed
+            domain.append(('country_ids', 'in', country_id))
+        rule_ids = self.search(cr, uid, domain, context=context)
+        for rule in self.browse(cr, uid, rule_ids, context=context):
+            if re.search(rule.regex_url, url):
+                return rule
+        return False
+
+
 class im_chat_session(osv.Model):
 
-    _inherit = 'im_chat.session'
+    _name = 'im_chat.session'
+    _inherit = ['im_chat.session', 'rating.mixin']
 
     def _get_fullname(self, cr, uid, ids, fields, arg, context=None):
         """ built the complete name of the session """
@@ -197,8 +260,6 @@ class im_chat_session(osv.Model):
         'create_date': fields.datetime('Create Date', required=True, select=True),
         'channel_id': fields.many2one("im_livechat.channel", "Channel"),
         'fullname' : fields.function(_get_fullname, type="char", string="Complete name"),
-        'feedback_rating': fields.selection([('10','Good'),('5','Ok'),('1','Bad')], 'Grade', help='Feedback from user (Bad, Ok or Good)'),
-        'feedback_reason': fields.text('Reason', help="Reason explaining the rating."),
     }
 
     def is_in_session(self, cr, uid, uuid, user_id, context=None):
@@ -231,50 +292,4 @@ class im_chat_session(osv.Model):
                 return False
             else:
                 return super(im_chat_session, self).quit_user(cr, uid, session.id, context=context)
-
-class LiveChatController(http.Controller):
-
-    @http.route('/im_livechat/support/<string:dbname>/<int:channel_id>', type='http', auth='none')
-    def support_page(self, dbname, channel_id, **kwargs):
-        registry, cr, uid, context = openerp.modules.registry.RegistryManager.get(dbname), request.cr, openerp.SUPERUSER_ID, request.context
-        info = registry.get('im_livechat.channel').get_info_for_chat_src(cr, uid, channel_id)
-        info["dbname"] = dbname
-        info["channel"] = channel_id
-        info["channel_name"] = registry.get('im_livechat.channel').read(cr, uid, channel_id, ['name'], context=context)["name"]
-        return request.render('im_livechat.support_page', info)
-
-    @http.route('/im_livechat/loader/<string:dbname>/<int:channel_id>', type='http', auth='none')
-    def loader(self, dbname, channel_id, **kwargs):
-        registry, cr, uid, context = openerp.modules.registry.RegistryManager.get(dbname), request.cr, openerp.SUPERUSER_ID, request.context
-        info = registry.get('im_livechat.channel').get_info_for_chat_src(cr, uid, channel_id)
-        info["dbname"] = dbname
-        info["channel"] = channel_id
-        info["username"] = kwargs.get("username", "Visitor")
-        return request.render('im_livechat.loader', info)
-
-    @http.route('/im_livechat/get_session', type="json", auth="none")
-    def get_session(self, channel_id, anonymous_name, **kwargs):
-        cr, uid, context, db = request.cr, request.uid or openerp.SUPERUSER_ID, request.context, request.db
-        reg = openerp.modules.registry.RegistryManager.get(db)
-        # if geoip, add the country name to the anonymous name
-        if hasattr(request, 'geoip'):
-            anonymous_name = anonymous_name + " ("+request.geoip.get('country_name', "")+")"
-        return reg.get("im_livechat.channel").get_channel_session(cr, uid, channel_id, anonymous_name, context=context)
-
-    @http.route('/im_livechat/available', type='json', auth="none")
-    def available(self, db, channel):
-        cr, uid, context, db = request.cr, request.uid or openerp.SUPERUSER_ID, request.context, request.db
-        reg = openerp.modules.registry.RegistryManager.get(db)
-        with reg.cursor() as cr:
-            return len(reg.get('im_livechat.channel').get_available_users(cr, uid, channel)) > 0
-
-
-    @http.route('/im_livechat/feedback', type='json', auth="none")
-    def feedback(self, uuid, rating, reason=None):
-        cr, uid, context, db = request.cr, request.uid or openerp.SUPERUSER_ID, request.context, request.db
-        registry = openerp.modules.registry.RegistryManager.get(db)
-        Session = registry['im_chat.session']
-        session_ids = Session.search(cr, uid, [('uuid','=',uuid)], context=context)
-        Session.write(cr, uid, session_ids, {'feedback_rating' : str(rating), 'feedback_reason' : reason}, context=context)
-
 

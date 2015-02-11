@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import collections
+import copy
 import cStringIO
 import datetime
 import hashlib
@@ -29,6 +30,7 @@ from openerp.http import request
 from openerp.tools.safe_eval import safe_eval as eval
 from openerp.osv import osv, orm, fields
 from openerp.tools import html_escape as escape
+from openerp.tools.misc import find_in_path
 from openerp.tools.translate import _
 
 _logger = logging.getLogger(__name__)
@@ -61,12 +63,31 @@ def raise_qweb_exception(etype=None, **kw):
         e.qweb['cause'] = original
         raise
 
+class FileSystemLoader(object):
+    def __init__(self, path):
+        # TODO: support multiple files #add_file() + add cache
+        self.path = path
+        self.doc = etree.parse(path).getroot()
+
+    def __iter__(self):
+        for node in self.doc:
+            name = node.get('t-name')
+            if name:
+                yield name
+
+    def __call__(self, name):
+        for node in self.doc:
+            if node.get('t-name') == name:
+                root = etree.Element('templates')
+                root.append(copy.deepcopy(node))
+                arch = etree.tostring(root, encoding='utf-8', xml_declaration=True)
+                return arch
+
 class QWebContext(dict):
-    def __init__(self, cr, uid, data, loader=None, templates=None, context=None):
+    def __init__(self, cr, uid, data, loader=None, context=None):
         self.cr = cr
         self.uid = uid
         self.loader = loader
-        self.templates = templates or {}
         self.context = context
         dic = dict(data)
         super(QWebContext, self).__init__(dic)
@@ -85,7 +106,6 @@ class QWebContext(dict):
         """
         return QWebContext(self.cr, self.uid, dict.copy(self),
                            loader=self.loader,
-                           templates=self.templates,
                            context=self.context)
 
     def __copy__(self):
@@ -142,50 +162,24 @@ class QWeb(orm.AbstractModel):
     def register_tag(self, tag, func):
         self._render_tag[tag] = func
 
-    def add_template(self, qwebcontext, name, node):
-        """Add a parsed template in the context. Used to preprocess templates."""
-        qwebcontext.templates[name] = node
+    def get_template(self, name, qwebcontext):
+        origin_template = qwebcontext.get('__caller__') or qwebcontext['__stack__'][0]
+        try:
+            document = qwebcontext.loader(name)
+        except ValueError:
+            raise_qweb_exception(QWebTemplateNotFound, message="Loader could not find template %r" % name, template=origin_template)
 
-    def load_document(self, document, res_id, qwebcontext):
-        """
-        Loads an XML document and installs any contained template in the engine
-
-        :type document: a parsed lxml.etree element, an unparsed XML document
-                        (as a string) or the path of an XML file to load
-        """
-        if not isinstance(document, basestring):
-            # assume lxml.etree.Element
+        if hasattr(document, 'documentElement'):
             dom = document
         elif document.startswith("<?xml"):
             dom = etree.fromstring(document)
         else:
             dom = etree.parse(document).getroot()
 
+        res_id = isinstance(name, (int, long)) and name or None
         for node in dom:
-            if node.get('t-name'):
-                name = str(node.get("t-name"))
-                self.add_template(qwebcontext, name, node)
-            if res_id and node.tag == "t":
-                self.add_template(qwebcontext, res_id, node)
-                res_id = None
-
-    def get_template(self, name, qwebcontext):
-        """ Tries to fetch the template ``name``, either gets it from the
-        context's template cache or loads one with the context's loader (if
-        any).
-
-        :raises QWebTemplateNotFound: if the template can not be found or loaded
-        """
-        origin_template = qwebcontext.get('__caller__') or qwebcontext['__stack__'][0]
-        if qwebcontext.loader and name not in qwebcontext.templates:
-            try:
-                xml_doc = qwebcontext.loader(name)
-            except ValueError:
-                raise_qweb_exception(QWebTemplateNotFound, message="Loader could not find template %r" % name, template=origin_template)
-            self.load_document(xml_doc, isinstance(name, (int, long)) and name or None, qwebcontext=qwebcontext)
-
-        if name in qwebcontext.templates:
-            return qwebcontext.templates[name]
+            if node.get('t-name') or (res_id and node.tag == "t"):
+                return node
 
         raise QWebTemplateNotFound("Template %r not found" % name, template=origin_template)
 
@@ -425,6 +419,10 @@ class QWeb(orm.AbstractModel):
                     '%s_odd' % varname: False,
                 })
             ru.append(self.render_element(element, template_attributes, generated_attributes, copy_qwebcontext))
+
+        for k in qwebcontext.keys():
+            qwebcontext[k] = copy_qwebcontext[k]
+
         return "".join(ru)
 
     def render_tag_if(self, element, template_attributes, generated_attributes, qwebcontext):
@@ -434,6 +432,14 @@ class QWeb(orm.AbstractModel):
 
     def render_tag_call(self, element, template_attributes, generated_attributes, qwebcontext):
         d = qwebcontext.copy()
+
+        if 'lang' in template_attributes:
+            init_lang = d.context.get('lang', 'en_US')
+            lang = template_attributes['lang']
+            d.context['lang'] = self.eval(lang, d) or lang
+            if not self.pool['res.lang'].search(d.cr, d.uid, [('code', '=', lang)], count=True, context=d.context):
+                _logger.info("'%s' is not a valid language code, is an empty field or is not installed, falling back to en_US", lang)
+
         d[0] = self.render_element(element, template_attributes, generated_attributes, d)
         cr = d.get('request') and d['request'].cr or None
         uid = d.get('request') and d['request'].uid or None
@@ -443,7 +449,14 @@ class QWeb(orm.AbstractModel):
             template = int(template)
         except ValueError:
             pass
-        return self.render(cr, uid, template, d)
+
+        res = self.render(cr, uid, template, d)
+
+        # we need to reset the lang after the rendering
+        if 'lang' in template_attributes:
+            d.context['lang'] = init_lang
+
+        return res
 
     def render_tag_call_assets(self, element, template_attributes, generated_attributes, qwebcontext):
         """ This special 't-call' tag can be used in order to aggregate/minify javascript and css assets"""
@@ -481,9 +494,11 @@ class QWeb(orm.AbstractModel):
         record, field_name = template_attributes["field"].rsplit('.', 1)
         record = self.eval_object(record, qwebcontext)
 
-        column = record._all_columns[field_name].column
-        options = json.loads(template_attributes.get('field-options') or '{}')
-        field_type = get_field_type(column, options)
+        field = record._fields[field_name]
+        foptions = self.eval_format(template_attributes.get('field-options') or '{}', qwebcontext)
+        options = json.loads(foptions)
+
+        field_type = get_field_type(field, options)
 
         converter = self.get_converter_for(field_type)
 
@@ -549,39 +564,44 @@ class FieldConverter(osv.AbstractModel):
         * ``model``, the name of the record's model
         * ``id`` the id of the record to which the field belongs
         * ``field`` the name of the converted field
-        * ``type`` the logical field type (widget, may not match the column's
-          ``type``, may not be any _column subclass name)
+        * ``type`` the logical field type (widget, may not match the field's
+          ``type``, may not be any Field subclass name)
         * ``translate``, a boolean flag (``0`` or ``1``) denoting whether the
-          column is translatable
+          field is translatable
+        * ``readonly``, has this attribute if the field is readonly
         * ``expression``, the original expression
 
         :returns: iterable of (attribute name, attribute value) pairs.
         """
-        column = record._all_columns[field_name].column
-        field_type = get_field_type(column, options)
-        return [
+        field = record._fields[field_name]
+        field_type = get_field_type(field, options)
+        data = [
             ('data-oe-model', record._name),
             ('data-oe-id', record.id),
             ('data-oe-field', field_name),
             ('data-oe-type', field_type),
             ('data-oe-expression', t_att['field']),
         ]
+        if record._all_columns[field_name].column.readonly:
+            data.append(('data-oe-readonly', 1))
+        return data
 
-    def value_to_html(self, cr, uid, value, column, options=None, context=None):
-        """ value_to_html(cr, uid, value, column, options=None, context=None)
+    def value_to_html(self, cr, uid, value, field, options=None, context=None):
+        """ value_to_html(cr, uid, value, field, options=None, context=None)
 
         Converts a single value to its HTML version/output
         """
         if not value: return ''
         return value
 
-    def record_to_html(self, cr, uid, field_name, record, column, options=None, context=None):
-        """ record_to_html(cr, uid, field_name, record, column, options=None, context=None)
+    def record_to_html(self, cr, uid, field_name, record, options=None, context=None):
+        """ record_to_html(cr, uid, field_name, record, options=None, context=None)
 
         Converts the specified field of the browse_record ``record`` to HTML
         """
+        field = record._fields[field_name]
         return self.value_to_html(
-            cr, uid, record[field_name], column, options=options, context=context)
+            cr, uid, record[field_name], field, options=options, context=context)
 
     def to_html(self, cr, uid, field_name, record, options,
                 source_element, t_att, g_att, qweb_context, context=None):
@@ -595,10 +615,7 @@ class FieldConverter(osv.AbstractModel):
         field's own ``_type``.
         """
         try:
-            content = self.record_to_html(
-                cr, uid, field_name, record,
-                record._all_columns[field_name].column,
-                options, context=context)
+            content = self.record_to_html(cr, uid, field_name, record, options, context=context)
             if options.get('html-escape', True):
                 content = escape(content)
             elif hasattr(content, '__html__'):
@@ -659,14 +676,14 @@ class FloatConverter(osv.AbstractModel):
     _name = 'ir.qweb.field.float'
     _inherit = 'ir.qweb.field'
 
-    def precision(self, cr, uid, column, options=None, context=None):
-        _, precision = column.digits or (None, None)
+    def precision(self, cr, uid, field, options=None, context=None):
+        _, precision = field.digits or (None, None)
         return precision
 
-    def value_to_html(self, cr, uid, value, column, options=None, context=None):
+    def value_to_html(self, cr, uid, value, field, options=None, context=None):
         if context is None:
             context = {}
-        precision = self.precision(cr, uid, column, options=options, context=context)
+        precision = self.precision(cr, uid, field, options=options, context=context)
         fmt = '%f' if precision is None else '%.{precision}f'
 
         lang_code = context.get('lang') or 'en_US'
@@ -685,7 +702,7 @@ class DateConverter(osv.AbstractModel):
     _name = 'ir.qweb.field.date'
     _inherit = 'ir.qweb.field'
 
-    def value_to_html(self, cr, uid, value, column, options=None, context=None):
+    def value_to_html(self, cr, uid, value, field, options=None, context=None):
         if not value or len(value)<10: return ''
         lang = self.user_lang(cr, uid, context=context)
         locale = babel.Locale.parse(lang.code)
@@ -708,7 +725,7 @@ class DateTimeConverter(osv.AbstractModel):
     _name = 'ir.qweb.field.datetime'
     _inherit = 'ir.qweb.field'
 
-    def value_to_html(self, cr, uid, value, column, options=None, context=None):
+    def value_to_html(self, cr, uid, value, field, options=None, context=None):
         if not value: return ''
         lang = self.user_lang(cr, uid, context=context)
         locale = babel.Locale.parse(lang.code)
@@ -734,7 +751,7 @@ class TextConverter(osv.AbstractModel):
     _name = 'ir.qweb.field.text'
     _inherit = 'ir.qweb.field'
 
-    def value_to_html(self, cr, uid, value, column, options=None, context=None):
+    def value_to_html(self, cr, uid, value, field, options=None, context=None):
         """
         Escapes the value and converts newlines to br. This is bullshit.
         """
@@ -746,19 +763,19 @@ class SelectionConverter(osv.AbstractModel):
     _name = 'ir.qweb.field.selection'
     _inherit = 'ir.qweb.field'
 
-    def record_to_html(self, cr, uid, field_name, record, column, options=None, context=None):
+    def record_to_html(self, cr, uid, field_name, record, options=None, context=None):
         value = record[field_name]
         if not value: return ''
-        selection = dict(fields.selection.reify(
-            cr, uid, record._model, column, context=context))
+        field = record._fields[field_name]
+        selection = dict(field.get_description(record.env)['selection'])
         return self.value_to_html(
-            cr, uid, selection[value], column, options=options)
+            cr, uid, selection[value], field, options=options)
 
 class ManyToOneConverter(osv.AbstractModel):
     _name = 'ir.qweb.field.many2one'
     _inherit = 'ir.qweb.field'
 
-    def record_to_html(self, cr, uid, field_name, record, column, options=None, context=None):
+    def record_to_html(self, cr, uid, field_name, record, options=None, context=None):
         [read] = record.read([field_name])
         if not read[field_name]: return ''
         _, value = read[field_name]
@@ -768,7 +785,7 @@ class HTMLConverter(osv.AbstractModel):
     _name = 'ir.qweb.field.html'
     _inherit = 'ir.qweb.field'
 
-    def value_to_html(self, cr, uid, value, column, options=None, context=None):
+    def value_to_html(self, cr, uid, value, field, options=None, context=None):
         return HTMLSafe(value or '')
 
 class ImageConverter(osv.AbstractModel):
@@ -783,7 +800,7 @@ class ImageConverter(osv.AbstractModel):
     _name = 'ir.qweb.field.image'
     _inherit = 'ir.qweb.field'
 
-    def value_to_html(self, cr, uid, value, column, options=None, context=None):
+    def value_to_html(self, cr, uid, value, field, options=None, context=None):
         try:
             image = Image.open(cStringIO.StringIO(value.decode('base64')))
             image.verify()
@@ -816,7 +833,7 @@ class MonetaryConverter(osv.AbstractModel):
             cr, uid, field_name, record, options,
             source_element, t_att, g_att, qweb_context, context=context)
 
-    def record_to_html(self, cr, uid, field_name, record, column, options, context=None):
+    def record_to_html(self, cr, uid, field_name, record, options, context=None):
         if context is None:
             context = {}
         Currency = self.pool['res.currency']
@@ -831,7 +848,7 @@ class MonetaryConverter(osv.AbstractModel):
         # The log10 of the rounding should be the number of digits involved if
         # negative, if positive clamp to 0 digits and call it a day.
         # nb: int() ~ floor(), we want nearest rounding instead
-        precision = int(round(math.log10(display_currency.rounding)))
+        precision = int(math.floor(math.log10(display_currency.rounding)))
         fmt = "%.{0}f".format(-precision if precision < 0 else 0)
 
         from_amount = record[field_name]
@@ -887,7 +904,7 @@ class DurationConverter(osv.AbstractModel):
     _name = 'ir.qweb.field.duration'
     _inherit = 'ir.qweb.field'
 
-    def value_to_html(self, cr, uid, value, column, options=None, context=None):
+    def value_to_html(self, cr, uid, value, field, options=None, context=None):
         units = dict(TIMEDELTA_UNITS)
         if value < 0:
             raise ValueError(_("Durations can't be negative"))
@@ -914,7 +931,7 @@ class RelativeDatetimeConverter(osv.AbstractModel):
     _name = 'ir.qweb.field.relative'
     _inherit = 'ir.qweb.field'
 
-    def value_to_html(self, cr, uid, value, column, options=None, context=None):
+    def value_to_html(self, cr, uid, value, field, options=None, context=None):
         parse_format = openerp.tools.DEFAULT_SERVER_DATETIME_FORMAT
         locale = babel.Locale.parse(
             self.user_lang(cr, uid, context=context).code)
@@ -922,8 +939,8 @@ class RelativeDatetimeConverter(osv.AbstractModel):
         if isinstance(value, basestring):
             value = datetime.datetime.strptime(value, parse_format)
 
-        # value should be a naive datetime in UTC. So is fields.datetime.now()
-        reference = datetime.datetime.strptime(column.now(), parse_format)
+        # value should be a naive datetime in UTC. So is fields.Datetime.now()
+        reference = datetime.datetime.strptime(field.now(), parse_format)
 
         return babel.dates.format_timedelta(
             value - reference, add_direction=True, locale=locale)
@@ -932,33 +949,32 @@ class Contact(orm.AbstractModel):
     _name = 'ir.qweb.field.contact'
     _inherit = 'ir.qweb.field.many2one'
 
-    def record_to_html(self, cr, uid, field_name, record, column, options=None, context=None):
+    def record_to_html(self, cr, uid, field_name, record, options=None, context=None):
         if context is None:
             context = {}
 
         if options is None:
             options = {}
         opf = options.get('fields') or ["name", "address", "phone", "mobile", "fax", "email"]
-        if not getattr(record, field_name):
-            return None
 
-        id = getattr(record, field_name).id
-        context.update(show_address=True)
-        field_browse = self.pool[column._obj].browse(cr, openerp.SUPERUSER_ID, id, context=context)
-        value = field_browse.name_get()[0][1]
+        value_rec = record[field_name]
+        if not value_rec:
+            return None
+        value_rec = value_rec.sudo().with_context(show_address=True)
+        value = value_rec.name_get()[0][1]
 
         val = {
             'name': value.split("\n")[0],
             'address': escape("\n".join(value.split("\n")[1:])).strip(),
-            'phone': field_browse.phone,
-            'mobile': field_browse.mobile,
-            'fax': field_browse.fax,
-            'city': field_browse.city,
-            'country_id': field_browse.country_id.display_name,
-            'website': field_browse.website,
-            'email': field_browse.email,
+            'phone': value_rec.phone,
+            'mobile': value_rec.mobile,
+            'fax': value_rec.fax,
+            'city': value_rec.city,
+            'country_id': value_rec.country_id.display_name,
+            'website': value_rec.website,
+            'email': value_rec.email,
             'fields': opf,
-            'object': field_browse,
+            'object': value_rec,
             'options': options
         }
 
@@ -970,7 +986,7 @@ class QwebView(orm.AbstractModel):
     _name = 'ir.qweb.field.qweb'
     _inherit = 'ir.qweb.field.many2one'
 
-    def record_to_html(self, cr, uid, field_name, record, column, options=None, context=None):
+    def record_to_html(self, cr, uid, field_name, record, options=None, context=None):
         if not getattr(record, field_name):
             return None
 
@@ -1056,10 +1072,9 @@ def nl2br(string, options=None):
         string = escape(string)
     return HTMLSafe(string.replace('\n', '<br>\n'))
 
-def get_field_type(column, options):
-    """ Gets a t-field's effective type from the field's column and its options
-    """
-    return options.get('widget', column._type)
+def get_field_type(field, options):
+    """ Gets a t-field's effective type from the field definition and its options """
+    return options.get('widget', field.type)
 
 class AssetError(Exception):
     pass
@@ -1533,14 +1548,25 @@ class SassStylesheetAsset(PreprocessedCSS):
         return "/*! %s */\n%s" % (self.id, content)
 
     def get_command(self):
-        return ['sass', '--stdin', '-t', 'compressed', '--unix-newlines', '--compass',
-               '-r', 'bootstrap-sass']
+        try:
+            sass = find_in_path('sass')
+        except IOError:
+            sass = 'sass'
+        return [sass, '--stdin', '-t', 'compressed', '--unix-newlines', '--compass',
+                '-r', 'bootstrap-sass']
 
 class LessStylesheetAsset(PreprocessedCSS):
     def get_command(self):
+        try:
+            if os.name == 'nt':
+                lessc = find_in_path('lessc.cmd')
+            else:
+                lessc = find_in_path('lessc')
+        except IOError:
+            lessc = 'lessc'
         webpath = openerp.http.addons_manifest['web']['addons_path']
         lesspath = os.path.join(webpath, 'web', 'static', 'lib', 'bootstrap', 'less')
-        return ['lessc', '-', '--clean-css', '--no-js', '--no-color', '--include-path=%s' % lesspath]
+        return [lessc, '-', '--clean-css', '--no-js', '--no-color', '--include-path=%s' % lesspath]
 
 def rjsmin(script):
     """ Minify js with a clever regex.
@@ -1585,5 +1611,3 @@ def rjsmin(script):
         r']*\*+(?:[^/*][^*]*\*+)*/))*)+', subber, '\n%s\n' % script
     ).strip()
     return result
-
-# vim:et:

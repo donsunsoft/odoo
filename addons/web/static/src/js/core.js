@@ -328,13 +328,6 @@ instance.web.Session.include( /** @lends instance.web.Session# */{
             }).done(function() {
                 self.on_modules_loaded();
                 self.trigger('module_loaded');
-                if (!Date.CultureInfo.pmDesignator) {
-                    // If no am/pm designator is specified but the openerp
-                    // datetime format uses %i, date.js won't be able to
-                    // correctly format a date. See bug#938497.
-                    Date.CultureInfo.amDesignator = 'AM';
-                    Date.CultureInfo.pmDesignator = 'PM';
-                }
             });
         });
     },
@@ -444,7 +437,8 @@ instance.web.Session.include( /** @lends instance.web.Session# */{
                 try {
                     if (options.error) {
                         var body = this.contentDocument.body;
-                        var node = body.childNodes[1] || body.childNodes[0];
+                        var nodes = body.children.length === 0 ? body.childNodes : body.children;
+                        var node = nodes[1] || nodes[0];
                         options.error(JSON.parse(node.textContent));
                     }
                 } finally {
@@ -545,10 +539,6 @@ instance.web.TranslationDataBase.include({
 });
 
 /** Custom jQuery plugins */
-$.browser = $.browser || {};
-if(navigator.appVersion.indexOf("MSIE") !== -1) {
-    $.browser.msie = 1;
-}
 $.fn.getAttributes = function() {
     var o = {};
     if (this.length) {
@@ -633,6 +623,7 @@ instance.web._lt = function (s) {
 instance.web.qweb.debug = instance.session.debug;
 _.extend(instance.web.qweb.default_dict, {
     '__debug__': instance.session.debug,
+    'moment': function(date) { return new moment(date); },
 });
 instance.web.qweb.preprocess_node = function() {
     // Note that 'this' is the Qweb Node
@@ -775,6 +766,7 @@ $.fn.tooltip.Constructor.DEFAULTS.trigger = 'hover focus click';
 $.fn.tooltip.Constructor.DEFAULTS.container = 'body';
 //overwrite bootstrap tooltip method to prevent showing 2 tooltip at the same time
 var bootstrap_show_function = $.fn.tooltip.Constructor.prototype.show;
+$.fn.modal.Constructor.prototype.enforceFocus = function () { };
 $.fn.tooltip.Constructor.prototype.show = function () {
     $('.tooltip').remove();
     //the following fix the bug when using placement
@@ -793,5 +785,3 @@ $.fn.tooltip.Constructor.prototype.show = function () {
 instance.web.client_actions = new instance.web.Registry();
 
 })();
-
-// vim:et fdc=0 fdl=0 foldnestmax=3 fdm=syntax:

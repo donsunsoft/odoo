@@ -42,19 +42,14 @@ You can manage:
     """,
     'author': 'OpenERP SA',
     'website': 'https://www.odoo.com/page/employees',
-    'images': [
-        'images/hr_department.jpeg',
-        'images/hr_employee.jpeg',
-        'images/hr_job_position.jpeg',
-        'static/src/img/default_image.png',
-    ],
-    'depends': ['base_setup','mail', 'resource', 'board'],
+    'depends': ['base_setup', 'mail', 'resource', 'board', 'web_tip'],
     'data': [
         'security/hr_security.xml',
         'security/ir.model.access.csv',
         'hr_view.xml',
         'hr_installer.xml',
         'hr_data.xml',
+        'hr_tip_data.xml',
         'res_config_view.xml',
         'mail_hr_view.xml',
         'res_users_view.xml',
@@ -71,4 +66,3 @@ You can manage:
     'auto_install': False,
     'qweb': [ 'static/src/xml/suggestions.xml' ],
 }
-# vim:expandtab:smartindent:tabstop=4:softtabstop=4:shiftwidth=4:

@@ -30,7 +30,8 @@ from openerp import SUPERUSER_ID
 from openerp import models, tools, api
 from openerp.modules.registry import RegistryManager
 from openerp.osv import fields, osv
-from openerp.osv.orm import BaseModel, Model, MAGIC_COLUMNS, except_orm
+from openerp.osv.orm import BaseModel, Model, MAGIC_COLUMNS
+from openerp.exceptions import UserError, AccessError
 from openerp.tools import config
 from openerp.tools.safe_eval import safe_eval as eval
 from openerp.tools.translate import _
@@ -62,6 +63,13 @@ def _in_modules(self, cr, uid, ids, field_name, arg, context=None):
         result[k] = ', '.join(sorted(installed_modules & set(xml_id.split('.')[0] for xml_id in v)))
     return result
 
+class unknown(models.AbstractModel):
+    """
+    Abstract model used as a substitute for relational fields with an unknown
+    comodel.
+    """
+    _name = '_unknown'
+
 class ir_model(osv.osv):
     _name = 'ir.model'
     _description = "Models"
@@ -82,7 +90,7 @@ class ir_model(osv.osv):
             return []
         __, operator, value = domain[0]
         if operator not in ['=', '!=']:
-            raise osv.except_osv(_("Invalid Search Criteria"), _('The osv_memory field can only be compared with = and != operator.'))
+            raise UserError(_("Invalid Search Criteria") + ": " + _("The osv_memory field can only be compared with = and != operator."))
         value = bool(value) if operator == '=' else not bool(value)
         all_model_ids = self.search(cr, uid, [], context=context)
         is_osv_mem = self._is_osv_memory(cr, uid, all_model_ids, 'osv_memory', arg=None, context=context)
@@ -173,7 +181,7 @@ class ir_model(osv.osv):
         if not context.get(MODULE_UNINSTALL_FLAG):
             for model in self.browse(cr, user, ids, context):
                 if model.state != 'manual':
-                    raise except_orm(_('Error'), _("Model '%s' contains module data and cannot be removed!") % (model.name,))
+                    raise UserError(_("Model '%s' contains module data and cannot be removed!") % (model.name,))
 
         self._drop_table(cr, user, ids, context)
         res = super(ir_model, self).unlink(cr, user, ids, context)
@@ -204,7 +212,10 @@ class ir_model(osv.osv):
             vals['state']='manual'
         res = super(ir_model,self).create(cr, user, vals, context)
         if vals.get('state','base')=='manual':
+            # add model in registry
             self.instanciate(cr, user, vals['model'], context)
+            self.pool.setup_models(cr, partial=(not self.pool.ready))
+            # update database schema
             model = self.pool[vals['model']]
             ctx = dict(context,
                 field_name=vals['name'],
@@ -213,7 +224,6 @@ class ir_model(osv.osv):
                 update_custom_fields=True)
             model._auto_init(cr, ctx)
             model._auto_end(cr, ctx) # actually create FKs!
-            self.pool.setup_models(cr, partial=(not self.pool.ready))
             RegistryManager.signal_registry_change(cr.dbname)
         return res
 
@@ -226,12 +236,7 @@ class ir_model(osv.osv):
             _module = False
             _custom = True
 
-        obj = CustomModel._build_model(self.pool, cr)
-        obj._rec_name = CustomModel._rec_name = (
-            'x_name' if 'x_name' in obj._columns else
-            list(obj._columns)[0] if obj._columns else
-            'id'
-        )
+        CustomModel._build_model(self.pool, cr)
 
 class ir_model_fields(osv.osv):
     _name = 'ir.model.fields'
@@ -291,10 +296,9 @@ class ir_model_fields(osv.osv):
         try:
             selection_list = eval(selection)
         except Exception:
-            _logger.warning('Invalid selection list definition for fields.selection', exc_info=True)
-            raise except_orm(_('Error'),
-                    _("The Selection Options expression is not a valid Pythonic expression."
-                      "Please provide an expression in the [('key','Label'), ...] format."))
+            _logger.info('Invalid selection list definition for fields.selection', exc_info=True)
+            raise UserError(_("The Selection Options expression is not a valid Pythonic expression."
+                                "Please provide an expression in the [('key','Label'), ...] format."))
 
         check = True
         if not (isinstance(selection_list, list) and selection_list):
@@ -306,8 +310,7 @@ class ir_model_fields(osv.osv):
                     break
 
         if not check:
-                raise except_orm(_('Error'),
-                    _("The Selection Options expression is must be in the [('key','Label'), ...] format!"))
+                raise UserError(_("The Selection Options expression is must be in the [('key','Label'), ...] format!"))
         return True
 
     def _size_gt_zero_msg(self, cr, user, ids, context=None):
@@ -346,13 +349,16 @@ class ir_model_fields(osv.osv):
             ids = [ids]
         if not context.get(MODULE_UNINSTALL_FLAG) and \
                 any(field.state != 'manual' for field in self.browse(cr, user, ids, context)):
-            raise except_orm(_('Error'), _("This column contains module data and cannot be removed!"))
+            raise UserError(_("This column contains module data and cannot be removed!"))
 
         self._drop_column(cr, user, ids, context)
         res = super(ir_model_fields, self).unlink(cr, user, ids, context)
         if not context.get(MODULE_UNINSTALL_FLAG):
+            # The field we just deleted might have be inherited, and registry is
+            # inconsistent in this case; therefore we reload the registry.
             cr.commit()
-            self.pool.setup_models(cr, partial=(not self.pool.ready))
+            api.Environment.reset()
+            RegistryManager.new(cr.dbname)
             RegistryManager.signal_registry_change(cr.dbname)
         return res
 
@@ -366,27 +372,28 @@ class ir_model_fields(osv.osv):
             vals['state'] = 'manual'
         if vals.get('ttype', False) == 'selection':
             if not vals.get('selection',False):
-                raise except_orm(_('Error'), _('For selection fields, the Selection Options must be given!'))
+                raise UserError(_('For selection fields, the Selection Options must be given!'))
             self._check_selection(cr, user, vals['selection'], context=context)
         res = super(ir_model_fields,self).create(cr, user, vals, context)
         if vals.get('state','base') == 'manual':
             if not vals['name'].startswith('x_'):
-                raise except_orm(_('Error'), _("Custom fields must have a name that starts with 'x_' !"))
+                raise UserError(_("Custom fields must have a name that starts with 'x_' !"))
 
             if vals.get('relation',False) and not self.pool['ir.model'].search(cr, user, [('model','=',vals['relation'])]):
-                raise except_orm(_('Error'), _("Model %s does not exist!") % vals['relation'])
+                raise UserError(_("Model %s does not exist!") % vals['relation'])
 
             if vals['model'] in self.pool:
                 model = self.pool[vals['model']]
                 if vals['model'].startswith('x_') and vals['name'] == 'x_name':
                     model._rec_name = 'x_name'
 
-                if self.pool.fields_by_model is not None:
-                    cr.execute('SELECT * FROM ir_model_fields WHERE id=%s', (res,))
-                    self.pool.fields_by_model.setdefault(vals['model'], []).append(cr.dictfetchone())
+                self.pool.clear_manual_fields()
 
+                # re-initialize model in registry
                 model.__init__(self.pool, cr)
-                #Added context to _auto_init for special treatment to custom field for select_level
+                self.pool.setup_models(cr, partial=(not self.pool.ready))
+                # update database schema
+                model = self.pool[vals['model']]
                 ctx = dict(context,
                     field_name=vals['name'],
                     field_state='manual',
@@ -394,7 +401,6 @@ class ir_model_fields(osv.osv):
                     update_custom_fields=True)
                 model._auto_init(cr, ctx)
                 model._auto_end(cr, ctx) # actually create FKs!
-                self.pool.setup_models(cr, partial=(not self.pool.ready))
                 RegistryManager.signal_registry_change(cr.dbname)
 
         return res
@@ -409,39 +415,40 @@ class ir_model_fields(osv.osv):
         if 'serialization_field_id' in vals or 'name' in vals:
             for field in self.browse(cr, user, ids, context=context):
                 if 'serialization_field_id' in vals and field.serialization_field_id.id != vals['serialization_field_id']:
-                    raise except_orm(_('Error!'),  _('Changing the storing system for field "%s" is not allowed.')%field.name)
+                    raise UserError(_('Changing the storing system for field "%s" is not allowed.') % field.name)
                 if field.serialization_field_id and (field.name != vals['name']):
-                    raise except_orm(_('Error!'),  _('Renaming sparse field "%s" is not allowed')%field.name)
+                    raise UserError(_('Renaming sparse field "%s" is not allowed') % field.name)
 
-        column_rename = None # if set, *one* column can be renamed here
-        models_patch = {}    # structs of (obj, [(field, prop, change_to),..])
-                             # data to be updated on the orm model
+        # if set, *one* column can be renamed here
+        column_rename = None
+
+        # field patches {model: {field_name: {prop_name: prop_value, ...}, ...}, ...}
+        patches = defaultdict(lambda: defaultdict(dict))
 
         # static table of properties
         model_props = [ # (our-name, fields.prop, set_fn)
             ('field_description', 'string', tools.ustr),
             ('required', 'required', bool),
             ('readonly', 'readonly', bool),
-            ('domain', '_domain', eval),
+            ('domain', 'domain', eval),
             ('size', 'size', int),
             ('on_delete', 'ondelete', str),
             ('translate', 'translate', bool),
-            ('selectable', 'selectable', bool),
-            ('select_level', 'select', int),
+            ('select_level', 'index', lambda x: bool(int(x))),
             ('selection', 'selection', eval),
-            ]
+        ]
 
         if vals and ids:
             checked_selection = False # need only check it once, so defer
 
             for item in self.browse(cr, user, ids, context=context):
                 obj = self.pool.get(item.model)
+                field = getattr(obj, '_fields', {}).get(item.name)
 
                 if item.state != 'manual':
-                    raise except_orm(_('Error!'),
-                        _('Properties of base fields cannot be altered in this manner! '
-                          'Please modify them through Python code, '
-                          'preferably through a custom addon!'))
+                    raise UserError(_('Properties of base fields cannot be altered in this manner! '
+                                        'Please modify them through Python code, '
+                                        'preferably through a custom addon!'))
 
                 if item.ttype == 'selection' and 'selection' in vals \
                         and not checked_selection:
@@ -452,34 +459,31 @@ class ir_model_fields(osv.osv):
                 if 'name' in vals and vals['name'] != item.name:
                     # We need to rename the column
                     if column_rename:
-                        raise except_orm(_('Error!'), _('Can only rename one column at a time!'))
+                        raise UserError(_('Can only rename one column at a time!'))
                     if vals['name'] in obj._columns:
-                        raise except_orm(_('Error!'), _('Cannot rename column to %s, because that column already exists!') % vals['name'])
+                        raise UserError(_('Cannot rename column to %s, because that column already exists!') % vals['name'])
                     if vals.get('state', 'base') == 'manual' and not vals['name'].startswith('x_'):
-                        raise except_orm(_('Error!'), _('New column name must still start with x_ , because it is a custom field!'))
+                        raise UserError(_('New column name must still start with x_ , because it is a custom field!'))
                     if '\'' in vals['name'] or '"' in vals['name'] or ';' in vals['name']:
                         raise ValueError('Invalid character in column name')
                     column_rename = (obj, (obj._table, item.name, vals['name']))
                     final_name = vals['name']
 
                 if 'model_id' in vals and vals['model_id'] != item.model_id.id:
-                    raise except_orm(_("Error!"), _("Changing the model of a field is forbidden!"))
+                    raise UserError(_("Changing the model of a field is forbidden!"))
 
                 if 'ttype' in vals and vals['ttype'] != item.ttype:
-                    raise except_orm(_("Error!"), _("Changing the type of a column is not yet supported. "
-                                "Please drop it and create it again!"))
+                    raise UserError(_("Changing the type of a column is not yet supported. " "Please drop it and create it again!"))
 
                 # We don't check the 'state', because it might come from the context
                 # (thus be set for multiple fields) and will be ignored anyway.
-                if obj is not None:
-                    models_patch.setdefault(obj._name, (obj,[]))
+                if obj is not None and field is not None:
                     # find out which properties (per model) we need to update
-                    for field_name, field_property, set_fn in model_props:
+                    for field_name, prop_name, func in model_props:
                         if field_name in vals:
-                            property_value = set_fn(vals[field_name])
-                            if getattr(obj._columns[item.name], field_property) != property_value:
-                                models_patch[obj._name][1].append((final_name, field_property, property_value))
-                        # our dict is ready here, but no properties are changed so far
+                            prop_value = func(vals[field_name])
+                            if getattr(field, prop_name) != prop_value:
+                                patches[obj][final_name][prop_name] = prop_value
 
         # These shall never be written (modified)
         for column_name in ('model_id', 'model', 'state'):
@@ -495,26 +499,32 @@ class ir_model_fields(osv.osv):
             # we want to change the key of field in obj._fields and obj._columns
             field = obj._pop_field(rename[1])
             obj._add_field(rename[2], field)
+            self.pool.setup_models(cr, partial=(not self.pool.ready))
 
-        if models_patch:
+        if patches:
             # We have to update _columns of the model(s) and then call their
             # _auto_init to sync the db with the model. Hopefully, since write()
             # was called earlier, they will be in-sync before the _auto_init.
             # Anything we don't update in _columns now will be reset from
             # the model into ir.model.fields (db).
-            ctx = dict(context, select=vals.get('select_level', '0'),
-                       update_custom_fields=True)
+            ctx = dict(context,
+                select=vals.get('select_level', '0'),
+                update_custom_fields=True,
+            )
 
-            for __, patch_struct in models_patch.items():
-                obj = patch_struct[0]
-                # TODO: update new-style fields accordingly
-                for col_name, col_prop, val in patch_struct[1]:
-                    setattr(obj._columns[col_name], col_prop, val)
+            for obj, model_patches in patches.iteritems():
+                for field_name, field_patches in model_patches.iteritems():
+                    # update field properties, and adapt corresponding column
+                    field = obj._fields[field_name]
+                    attrs = dict(field._attrs, **field_patches)
+                    obj._add_field(field_name, field.new(**attrs))
+
+                # update database schema
+                self.pool.setup_models(cr, partial=(not self.pool.ready))
                 obj._auto_init(cr, ctx)
                 obj._auto_end(cr, ctx) # actually create FKs!
 
-        if column_rename or models_patch:
-            self.pool.setup_models(cr, partial=(not self.pool.ready))
+        if column_rename or patches:
             RegistryManager.signal_registry_change(cr.dbname)
 
         return res
@@ -551,7 +561,7 @@ class ir_model_constraint(Model):
         """ 
 
         if uid != SUPERUSER_ID and not self.pool['ir.model.access'].check_groups(cr, uid, "base.group_system"):
-            raise except_orm(_('Permission Denied'), (_('Administrator access is required to uninstall a module')))
+            raise AccessError(_('Administrator access is required to uninstall a module'))
 
         context = dict(context or {})
 
@@ -612,7 +622,7 @@ class ir_model_relation(Model):
         """ 
 
         if uid != SUPERUSER_ID and not self.pool['ir.model.access'].check_groups(cr, uid, "base.group_system"):
-            raise except_orm(_('Permission Denied'), (_('Administrator access is required to uninstall a module')))
+            raise AccessError(_('Administrator access is required to uninstall a module'))
 
         ids_set = set(ids)
         to_drop_table = []
@@ -779,10 +789,10 @@ class ir_model_access(osv.osv):
             else:
                 msg_tail = _("Please contact your system administrator if you think this is an error.") + "\n\n(" + _("Document model") + ": %s)"
                 msg_params = (model_name,)
-            _logger.warning('Access Denied by ACLs for operation: %s, uid: %s, model: %s', mode, uid, model_name)
+            _logger.info('Access Denied by ACLs for operation: %s, uid: %s, model: %s', mode, uid, model_name)
             msg = '%s %s' % (msg_heads[mode], msg_tail)
             raise openerp.exceptions.AccessError(msg % msg_params)
-        return r or False
+        return bool(r)
 
     __cache_clearing_methods = []
 
@@ -960,7 +970,7 @@ class ir_model_data(osv.osv):
         if check_right:
             return model, res_id
         if raise_on_access_error:
-            raise ValueError('Not enough access rights on the external ID: %s.%s' % (module, xml_id))
+            raise AccessError('Not enough access rights on the external ID: %s.%s' % (module, xml_id))
         return model, False
 
     def get_object(self, cr, uid, module, xml_id, context=None):
@@ -973,11 +983,15 @@ class ir_model_data(osv.osv):
     def _update_dummy(self,cr, uid, model, module, xml_id=False, store=True):
         if not xml_id:
             return False
+        id = False
         try:
-            id = self.read(cr, uid, [self._get_id(cr, uid, module, xml_id)], ['res_id'])[0]['res_id']
-            self.loads[(module,xml_id)] = (model,id)
-        except:
-            id = False
+            # One step to check the ID is defined and the record actually exists
+            record = self.get_object(cr, uid, module, xml_id)
+            if record:
+                id = record.id
+                self.loads[(module,xml_id)] = (model,id)
+        except Exception:
+            pass
         return id
 
     def clear_caches(self):
@@ -1119,7 +1133,7 @@ class ir_model_data(osv.osv):
         ids = self.search(cr, uid, [('module', 'in', modules_to_remove)])
 
         if uid != 1 and not self.pool['ir.model.access'].check_groups(cr, uid, "base.group_system"):
-            raise except_orm(_('Permission Denied'), (_('Administrator access is required to uninstall a module')))
+            raise AccessError(_('Administrator access is required to uninstall a module'))
 
         context = dict(context or {})
         context[MODULE_UNINSTALL_FLAG] = True # enable model/field deletion
@@ -1256,5 +1270,3 @@ class wizard_model_menu(osv.osv_memory):
                 'icon': 'STOCK_INDENT'
             }, context)
         return {'type':'ir.actions.act_window_close'}
-
-# vim:expandtab:smartindent:tabstop=4:softtabstop=4:shiftwidth=4:

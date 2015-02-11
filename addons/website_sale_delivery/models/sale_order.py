@@ -6,9 +6,10 @@ from openerp.addons import decimal_precision
 
 
 class delivery_carrier(orm.Model):
-    _inherit = 'delivery.carrier'
+    _name = 'delivery.carrier'
+    _inherit = ['delivery.carrier', 'website.published.mixin']
+
     _columns = {
-        'website_published': fields.boolean('Available in the website', copy=False),
         'website_description': fields.text('Description for the website'),
     }
     _defaults = {
@@ -63,7 +64,7 @@ class SaleOrder(orm.Model):
         if not order:
             return False
         if all(line.product_id.type == "service" for line in order.website_order_line):
-            order.write({'carrier_id': None}, context=context)
+            order.write({'carrier_id': None})
             self.pool['sale.order']._delivery_unset(cr, SUPERUSER_ID, [order.id], context=context)
             return True
         else: 
@@ -81,11 +82,11 @@ class SaleOrder(orm.Model):
                     if grid_id:
                         carrier_id = delivery_id
                         break
-                order.write({'carrier_id': carrier_id}, context=context)
+                order.write({'carrier_id': carrier_id})
             if carrier_id:
-                order.delivery_set(context=context)
+                order.delivery_set()
             else:
-                order._delivery_unset(context=context)                    
+                order._delivery_unset()                    
 
         return bool(carrier_id)
 

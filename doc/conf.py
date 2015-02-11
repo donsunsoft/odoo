@@ -46,7 +46,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = u'odoo'
-copyright = u'2014, OpenERP s.a.'
+copyright = u'Odoo S.A.'
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
@@ -166,6 +166,12 @@ html_sidebars = {
 # base URL from which the finished HTML is served.
 #html_use_opensearch = ''
 
+latex_elements = {
+    'papersize': r'a4paper',
+    'preamble': u'''\\setcounter{tocdepth}{2}
+''',
+}
+
 # default must be set otherwise ifconfig blows up
 todo_include_todos = False
 
@@ -186,6 +192,9 @@ def setup(app):
 
     app.connect('html-page-context', versionize)
     app.add_config_value('versions', '', 'env')
+
+    app.connect('html-page-context', analytics)
+    app.add_config_value('google_analytics_key', False, 'env')
 
 def canonicalize(app, pagename, templatename, context, doctree):
     """ Adds a 'canonical' URL for the current document in the rendering
@@ -212,6 +221,12 @@ def versionize(app, pagename, templatename, context, doctree):
         if vs != app.config.version
     ]
 
+def analytics(app, pagename, templatename, context, doctree):
+    if not app.config.google_analytics_key:
+        return
+
+    context['google_analytics_key'] = app.config.google_analytics_key
+
 def _build_url(root, branch, pagename):
     return "{canonical_url}{canonical_branch}/{canonical_page}".format(
         canonical_url=root,
@@ -219,4 +234,3 @@ def _build_url(root, branch, pagename):
         canonical_page=(pagename + '.html').replace('index.html', '')
                                            .replace('index/', ''),
     )
-

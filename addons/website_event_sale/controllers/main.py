@@ -23,10 +23,21 @@ from openerp import SUPERUSER_ID
 from openerp.addons.web import http
 from openerp.addons.web.http import request
 from openerp.addons.website_event.controllers.main import website_event
+from openerp.addons.website_sale.controllers.main import get_pricelist
 from openerp.tools.translate import _
 
 
 class website_event(website_event):
+
+    @http.route(['/event/<model("event.event"):event>/register'], type='http', auth="public", website=True)
+    def event_register(self, event, **post):
+        pricelist_id = int(get_pricelist())
+        values = {
+            'event': event.with_context(pricelist=pricelist_id),
+            'main_object': event.with_context(pricelist=pricelist_id),
+            'range': range,
+        }
+        return request.website.render("website_event.event_description_full", values)
 
     def _process_tickets_details(self, data):
         ticket_post = {}
@@ -46,20 +57,9 @@ class website_event(website_event):
         order = request.website.sale_get_order(force_create=1)
 
         registrations = self._process_registration_details(post)
-        registration_ctx = dict(context, registration_force_draft=True)
         for registration in registrations:
             ticket = request.registry['event.event.ticket'].browse(cr, SUPERUSER_ID, int(registration['ticket_id']), context=context)
-            order.with_context(event_ticket_id=ticket.id)._cart_update(product_id=ticket.product_id.id, add_qty=1)
-
-            request.registry['event.registration'].create(cr, SUPERUSER_ID, {
-                'name': registration.get('name'),
-                'phone': registration.get('phone'),
-                'email': registration.get('email'),
-                'event_ticket_id': int(registration['ticket_id']),
-                'partner_id': order.partner_id.id,
-                'event_id': event.id,
-                'origin': order.name,
-            }, context=registration_ctx)
+            order.with_context(event_ticket_id=ticket.id)._cart_update(product_id=ticket.product_id.id, add_qty=1, registration_data=[registration])
 
         return request.redirect("/shop/checkout")
 

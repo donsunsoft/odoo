@@ -38,6 +38,7 @@ from openerp.tools.translate import _
 from openerp import http
 
 from openerp.http import request, serialize_exception as _serialize_exception
+from openerp.exceptions import AccessError
 
 _logger = logging.getLogger(__name__)
 
@@ -467,7 +468,6 @@ class Home(http.Controller):
     @http.route('/web', type='http', auth="none")
     def web_client(self, s_action=None, **kw):
         ensure_db()
-
         if request.session.uid:
             if kw.get('redirect'):
                 return werkzeug.utils.redirect(kw.get('redirect'), 303)
@@ -479,10 +479,15 @@ class Home(http.Controller):
         else:
             return login_redirect()
 
+    @http.route('/web/dbredirect', type='http', auth="none")
+    def web_db_redirect(self, redirect='/', **kw):
+        ensure_db()
+        return werkzeug.utils.redirect(redirect, 303)
+
     @http.route('/web/login', type='http', auth="none")
     def web_login(self, redirect=None, **kw):
         ensure_db()
-
+        request.params['login_success'] = False
         if request.httprequest.method == 'GET' and redirect and request.session.uid:
             return http.redirect_with_hash(redirect)
 
@@ -490,10 +495,6 @@ class Home(http.Controller):
             request.uid = openerp.SUPERUSER_ID
 
         values = request.params.copy()
-        if not redirect:
-            redirect = '/web?' + request.httprequest.query_string
-        values['redirect'] = redirect
-
         try:
             values['databases'] = http.db_list()
         except openerp.exceptions.AccessDenied:
@@ -503,6 +504,9 @@ class Home(http.Controller):
             old_uid = request.uid
             uid = request.session.authenticate(request.session.db, request.params['login'], request.params['password'])
             if uid is not False:
+                request.params['login_success'] = True
+                if not redirect:
+                    redirect = '/web'
                 return http.redirect_with_hash(redirect)
             request.uid = old_uid
             values['error'] = "Wrong login/password"
@@ -554,14 +558,6 @@ class WebClient(http.Controller):
     def load_locale(self, lang):
         magic_file_finding = [lang.replace("_",'-').lower(), lang.split('_')[0]]
         addons_path = http.addons_manifest['web']['addons_path']
-        #load datejs locale
-        datejs_locale = ""
-        try:
-            with open(os.path.join(addons_path, 'web', 'static', 'lib', 'datejs', 'globalization', lang.replace('_', '-') + '.js'), 'r') as f:
-                datejs_locale = f.read()
-        except IOError:
-            pass
-
         #load momentjs locale
         momentjs_locale_file = False
         momentjs_locale = ""
@@ -576,7 +572,7 @@ class WebClient(http.Controller):
 
         #return the content of the locale
         headers = [('Content-Type', 'application/javascript'), ('Cache-Control', 'max-age=%s' % (36000))]
-        return request.make_response(datejs_locale + "\n"+ momentjs_locale, headers)
+        return request.make_response(momentjs_locale, headers)
 
     @http.route('/web/webclient/qweb', type='http', auth="none")
     def qweb(self, mods=None, db=None):
@@ -748,24 +744,21 @@ class Database(http.Controller):
             return {'error': _('Could not drop database !'), 'title': _('Drop Database')}
 
     @http.route('/web/database/backup', type='http', auth="none")
-    def backup(self, backup_db, backup_pwd, token, **kwargs):
+    def backup(self, backup_db, backup_pwd, token, backup_format='zip'):
         try:
-            format = kwargs.get('format')
-            ext = "zip" if format == 'zip' else "dump"
-            db_dump = base64.b64decode(
-                request.session.proxy("db").dump(backup_pwd, backup_db, format))
-            filename = "%(db)s_%(timestamp)s.%(ext)s" % {
-                'db': backup_db,
-                'timestamp': datetime.datetime.utcnow().strftime(
-                    "%Y-%m-%d_%H-%M-%SZ"),
-                'ext': ext
-            }
-            return request.make_response(db_dump,
-               [('Content-Type', 'application/octet-stream; charset=binary'),
-               ('Content-Disposition', content_disposition(filename))],
-               {'fileToken': token}
-            )
+            openerp.service.security.check_super(backup_pwd)
+            ts = datetime.datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+            filename = "%s_%s.%s" % (backup_db, ts, backup_format)
+            headers = [
+                ('Content-Type', 'application/octet-stream; charset=binary'),
+                ('Content-Disposition', content_disposition(filename)),
+            ]
+            dump_stream = openerp.service.db.dump_db(backup_db, None, backup_format)
+            response = werkzeug.wrappers.Response(dump_stream, headers=headers, direct_passthrough=True)
+            response.set_cookie('fileToken', token)
+            return response
         except Exception, e:
+            _logger.exception('Database.backup')
             return simplejson.dumps([[],[{'error': openerp.tools.ustr(e), 'title': _('Backup Database')}]])
 
     @http.route('/web/database/restore', type='http', auth="none")
@@ -800,6 +793,7 @@ class Session(http.Controller):
             "user_context": request.session.get_context() if request.session.uid else {},
             "db": request.session.db,
             "username": request.session.login,
+            "company_id": request.env.user.company_id.id if request.session.uid else None,
         }
 
     @http.route('/web/session/get_session_info', type='json', auth="none")
@@ -962,7 +956,7 @@ class DataSet(http.Controller):
                 return records
 
         if method.startswith('_'):
-            raise Exception("Access Denied: Underscore prefixed methods cannot be remotely called")
+            raise AccessError(_("Underscore prefixed methods cannot be remotely called"))
 
         return getattr(request.registry.get(model), method)(request.cr, request.uid, *args, **kwargs)
 
@@ -1020,19 +1014,6 @@ class View(http.Controller):
         }, request.context)
         return {'result': True}
 
-    @http.route('/web/view/undo_custom', type='json', auth="user")
-    def undo_custom(self, view_id, reset=False):
-        CustomView = request.session.model('ir.ui.view.custom')
-        vcustom = CustomView.search([('user_id', '=', request.session.uid), ('ref_id' ,'=', view_id)],
-                                    0, False, False, request.context)
-        if vcustom:
-            if reset:
-                CustomView.unlink(vcustom, request.context)
-            else:
-                CustomView.unlink([vcustom[0]], request.context)
-            return {'result': True}
-        return {'result': False}
-
 class TreeView(View):
 
     @http.route('/web/treeview/action', type='json', auth="user")
@@ -1046,7 +1027,8 @@ class Binary(http.Controller):
     @http.route('/web/binary/image', type='http', auth="public")
     def image(self, model, id, field, **kw):
         last_update = '__last_update'
-        Model = request.session.model(model)
+        Model = request.registry[model]
+        cr, uid, context = request.cr, request.uid, request.context
         headers = [('Content-Type', 'image/png')]
         etag = request.httprequest.headers.get('If-None-Match')
         hashed_session = hashlib.md5(request.session_id).hexdigest()
@@ -1059,15 +1041,15 @@ class Binary(http.Controller):
                 if not id and hashed_session == etag:
                     return werkzeug.wrappers.Response(status=304)
                 else:
-                    date = Model.read([id], [last_update], request.context)[0].get(last_update)
+                    date = Model.read(cr, uid, [id], [last_update], context)[0].get(last_update)
                     if hashlib.md5(date).hexdigest() == etag:
                         return werkzeug.wrappers.Response(status=304)
 
             if not id:
-                res = Model.default_get([field], request.context).get(field)
+                res = Model.default_get(cr, uid, [field], context).get(field)
                 image_base64 = res
             else:
-                res = Model.read([id], [last_update, field], request.context)[0]
+                res = Model.read(cr, uid, [id], [last_update, field], context)[0]
                 retag = hashlib.md5(res.get(last_update)).hexdigest()
                 image_base64 = res.get(field)
 
@@ -1113,15 +1095,20 @@ class Binary(http.Controller):
         :param str filename_field: field holding the file's name, if any
         :returns: :class:`werkzeug.wrappers.Response`
         """
-        Model = request.session.model(model)
+        Model = request.registry[model]
+        cr, uid, context = request.cr, request.uid, request.context
         fields = [field]
+        content_type = 'application/octet-stream'
         if filename_field:
             fields.append(filename_field)
         if id:
-            res = Model.read([int(id)], fields, request.context)[0]
+            fields.append('file_type')
+            res = Model.read(cr, uid, [int(id)], fields, context)[0]
+            if res.get('file_type'):
+                content_type = res['file_type']
         else:
-            res = Model.default_get(fields, request.context)
-        filecontent = base64.b64decode(res.get(field, ''))
+            res = Model.default_get(cr, uid, fields, context)
+        filecontent = base64.b64decode(res.get(field) or '')
         if not filecontent:
             return request.not_found()
         else:
@@ -1129,7 +1116,7 @@ class Binary(http.Controller):
             if filename_field:
                 filename = res.get(filename_field, '') or filename
             return request.make_response(filecontent,
-                [('Content-Type', 'application/octet-stream'),
+                [('Content-Type', content_type),
                  ('Content-Disposition', content_disposition(filename))])
 
     @http.route('/web/binary/saveas_ajax', type='http', auth="public")
@@ -1142,18 +1129,22 @@ class Binary(http.Controller):
         id = jdata.get('id', None)
         filename_field = jdata.get('filename_field', None)
         context = jdata.get('context', {})
+        content_type = 'application/octet-stream'
 
         Model = request.session.model(model)
         fields = [field]
         if filename_field:
             fields.append(filename_field)
         if data:
-            res = { field: data }
+            res = {field: data, filename_field: jdata.get('filename', None)}
         elif id:
+            fields.append('file_type')
             res = Model.read([int(id)], fields, context)[0]
+            if res.get('file_type'):
+                content_type = res['file_type']
         else:
             res = Model.default_get(fields, context)
-        filecontent = base64.b64decode(res.get(field, ''))
+        filecontent = base64.b64decode(res.get(field) or '')
         if not filecontent:
             raise ValueError(_("No content found for field '%s' on '%s:%s'") %
                 (field, model, id))
@@ -1162,7 +1153,7 @@ class Binary(http.Controller):
             if filename_field:
                 filename = res.get(filename_field, '') or filename
             return request.make_response(filecontent,
-                headers=[('Content-Type', 'application/octet-stream'),
+                headers=[('Content-Type', content_type),
                         ('Content-Disposition', content_disposition(filename))],
                 cookies={'fileToken': token})
 
@@ -1576,6 +1567,7 @@ class Reports(http.Controller):
     @serialize_exception
     def index(self, action, token):
         action = simplejson.loads(action)
+
         report_srv = request.session.proxy("report")
         context = dict(request.context)
         context.update(action["context"])
@@ -1618,14 +1610,12 @@ class Reports(http.Controller):
             else:
                 file_name = action['report_name']
         file_name = '%s.%s' % (file_name, report_struct['format'])
-        headers=[
-             ('Content-Disposition', content_disposition(file_name)),
-             ('Content-Type', report_mimetype),
-             ('Content-Length', len(report))]
-        if action.get('pdf_viewer'):
-            del headers[0]
+
         return request.make_response(report,
-             headers=headers,
+             headers=[
+                 ('Content-Disposition', content_disposition(file_name)),
+                 ('Content-Type', report_mimetype),
+                 ('Content-Length', len(report))],
              cookies={'fileToken': token})
 
 class Apps(http.Controller):
@@ -1652,7 +1642,3 @@ class Apps(http.Controller):
         sakey = Session().save_session_action(action)
         debug = '?debug' if req.debug else ''
         return werkzeug.utils.redirect('/web{0}#sa={1}'.format(debug, sakey))
-
-
-
-# vim:expandtab:tabstop=4:softtabstop=4:shiftwidth=4:

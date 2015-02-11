@@ -82,6 +82,10 @@
                 view.on('view_list_rendered', self, function() {
                     self.eval_tip(action_id, model, fields_view.type);
                 });
+            } else if (view.hasOwnProperty('editor')) {
+                view.on('view_list_rendered', self, function() {
+                    self.reposition();
+                });
             }
         },
 
@@ -90,13 +94,13 @@
             var model = formView.model;
             var type = formView.datarecord.type ? formView.datarecord.type : null;
             var mode = 'form';
-            formView.on('view_content_has_changed', self, function() {
+            formView.on('view_content_has_changed', self, _.once(function() {
                 self.eval_tip(null, model, mode, type);
-            });
+            }));
             if ($('.oe_chatter').length > 0) {
-                instance.web.bus.on('chatter_messages_fetched', this, function() {
+                instance.web.bus.on('chatter_messages_fetched', this, _.once(function () {
                     self.eval_tip(null, model, mode, type);
-                });
+                }));
             } else {
                 self.eval_tip(null, model, mode, type);
             }
@@ -159,7 +163,7 @@
             var triggers = tip.trigger_selector ? tip.trigger_selector.split(',') : [];
             var trigger_tip = true;
 
-            if(!$(highlight_selector).length > 0) {
+            if(!$(highlight_selector).length > 0 || !$(highlight_selector).is(":visible")) {
                 return def.reject();
             }
             for (var i = 0; i < triggers.length; i++) {
@@ -276,6 +280,7 @@
             var self = this;
             if (self.tip_mutex.def.state() === 'pending') {
                 self._set_helper_position();
+                self.$element.popover('show');
             }
         },
 

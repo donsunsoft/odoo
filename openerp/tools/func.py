@@ -20,7 +20,7 @@
 #
 ##############################################################################
 
-__all__ = ['synchronized', 'lazy_property', 'conditional']
+__all__ = ['synchronized', 'lazy_property', 'classproperty', 'conditional']
 
 from functools import wraps
 from inspect import getsourcefile
@@ -116,4 +116,10 @@ def compose(a, b):
         return a(b(*args, **kwargs))
     return wrapper
 
-# vim:expandtab:smartindent:tabstop=4:softtabstop=4:shiftwidth=4:
+
+class _ClassProperty(property):
+    def __get__(self, cls, owner):
+        return self.fget.__get__(None, owner)()
+
+def classproperty(func):
+    return _ClassProperty(classmethod(func))

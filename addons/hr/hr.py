@@ -72,7 +72,6 @@ class hr_employee_category(osv.Model):
         (_check_recursion, 'Error! You cannot create recursive Categories.', ['parent_id'])
     ]
 
-
 class hr_job(osv.Model):
 
     def _get_nbr_employees(self, cr, uid, ids, name, args, context=None):
@@ -129,11 +128,12 @@ class hr_job(osv.Model):
     _defaults = {
         'company_id': lambda self, cr, uid, ctx=None: self.pool.get('res.company')._company_default_get(cr, uid, 'hr.job', context=ctx),
         'state': 'recruit',
+        'no_of_recruitment' : 1,
     }
 
     _sql_constraints = [
         ('name_company_uniq', 'unique(name, company_id, department_id)', 'The name of the job position must be unique per department in company!'),
-        ('hired_employee_check', "CHECK ( no_of_hired_employee <= no_of_recruitment )", "Number of hired employee must be less than expected number of employee in recruitment."),
+        
     ]
 
     def set_recruit(self, cr, uid, ids, context=None):
@@ -187,13 +187,13 @@ class hr_employee(osv.osv):
     _columns = {
         #we need a related field in order to be able to sort the employee by name
         'name_related': fields.related('resource_id', 'name', type='char', string='Name', readonly=True, store=True),
-        'country_id': fields.many2one('res.country', 'Nationality'),
+        'country_id': fields.many2one('res.country', 'Nationality (Country)'),
         'birthday': fields.date("Date of Birth"),
         'ssnid': fields.char('SSN No', help='Social Security Number'),
         'sinid': fields.char('SIN No', help="Social Insurance Number"),
         'identification_id': fields.char('Identification No'),
         'otherid': fields.char('Other Id'),
-        'gender': fields.selection([('male', 'Male'), ('female', 'Female')], 'Gender'),
+        'gender': fields.selection([('male', 'Male'), ('female', 'Female'), ('other', 'Other')], 'Gender'),
         'marital': fields.selection([('single', 'Single'), ('married', 'Married'), ('widower', 'Widower'), ('divorced', 'Divorced')], 'Marital Status'),
         'department_id': fields.many2one('hr.department', 'Department'),
         'address_id': fields.many2one('res.partner', 'Working Address'),
@@ -202,7 +202,7 @@ class hr_employee(osv.osv):
         'work_phone': fields.char('Work Phone', readonly=False),
         'mobile_phone': fields.char('Work Mobile', readonly=False),
         'work_email': fields.char('Work Email', size=240),
-        'work_location': fields.char('Office Location'),
+        'work_location': fields.char('Work Location'),
         'notes': fields.text('Notes'),
         'parent_id': fields.many2one('hr.employee', 'Manager'),
         'category_ids': fields.many2many('hr.employee.category', 'employee_category_rel', 'emp_id', 'category_id', 'Tags'),
@@ -352,8 +352,8 @@ class hr_employee(osv.osv):
         if auto_follow_fields is None:
             auto_follow_fields = ['user_id']
         user_field_lst = []
-        for name, column_info in self._all_columns.items():
-            if name in auto_follow_fields and name in updated_fields and column_info.column._obj == 'res.users':
+        for name, field in self._fields.items():
+            if name in auto_follow_fields and name in updated_fields and field.comodel_name == 'res.users':
                 user_field_lst.append(name)
         return user_field_lst
 
@@ -468,4 +468,3 @@ class res_users(osv.osv):
                     employee_ids = employee_obj.search(cr, uid, [('user_id', '=', user_id)])
                     employee_obj.write(cr, uid, employee_ids, {'name': vals['name']}, context=context)
         return result
-

@@ -31,6 +31,7 @@ from openerp import tools
 from openerp.addons.resource.faces import task as Task
 from openerp.osv import fields, osv
 from openerp.tools.translate import _
+from openerp.exceptions import UserError
 
 
 class project_task_type(osv.osv):
@@ -39,11 +40,23 @@ class project_task_type(osv.osv):
     _order = 'sequence'
     _columns = {
         'name': fields.char('Stage Name', required=True, translate=True),
-        'description': fields.text('Description'),
+        'description': fields.text('Description', translate=True),
         'sequence': fields.integer('Sequence'),
         'case_default': fields.boolean('Default for New Projects',
                         help="If you check this field, this stage will be proposed by default on each new project. It will not assign this stage to existing projects."),
         'project_ids': fields.many2many('project.project', 'project_task_type_rel', 'type_id', 'project_id', 'Projects'),
+        'legend_priority': fields.char(
+            'Priority Management Explanation', translate=True,
+            help='Explanation text to help users using the star and priority mechanism on stages or issues that are in this stage.'),
+        'legend_blocked': fields.char(
+            'Kanban Blocked Explanation', translate=True,
+            help='Override the default value displayed for the blocked state for kanban selection, when the task or issue is in that stage.'),
+        'legend_done': fields.char(
+            'Kanban Valid Explanation', translate=True,
+            help='Override the default value displayed for the done state for kanban selection, when the task or issue is in that stage.'),
+        'legend_normal': fields.char(
+            'Kanban Ongoing Explanation', translate=True,
+            help='Override the default value displayed for the normal state for kanban selection, when the task or issue is in that stage.'),
         'fold': fields.boolean('Folded in Kanban View',
                                help='This stage is folded in the kanban view when'
                                'there are no records in that stage to display.'),
@@ -173,8 +186,7 @@ class project(osv.osv):
         analytic_account_to_delete = set()
         for proj in self.browse(cr, uid, ids, context=context):
             if proj.tasks:
-                raise osv.except_osv(_('Invalid Action!'),
-                                     _('You cannot delete a project containing tasks. You can either delete all the project\'s tasks and then delete the project or simply deactivate the project.'))
+                raise UserError(_('You cannot delete a project containing tasks. You can either delete all the project\'s tasks and then delete the project or simply deactivate the project.'))
             elif proj.alias_id:
                 alias_ids.append(proj.alias_id.id)
             if proj.analytic_account_id and not proj.analytic_account_id.line_ids:
@@ -205,9 +217,9 @@ class project(osv.osv):
 
     def _get_visibility_selection(self, cr, uid, context=None):
         """ Overriden in portal_project to offer more options """
-        return [('public', 'Public project'),
-                ('employees', 'Internal project: all employees can access'),
-                ('followers', 'Private project: followers Only')]
+        return [('public', _('Public project')),
+                ('employees', _('Internal project: all employees can access')),
+                ('followers', _('Private project: followers Only'))]
 
     def attachment_tree_view(self, cr, uid, ids, context):
         task_ids = self.pool.get('project.task').search(cr, uid, [('project_id', 'in', ids)])
@@ -280,6 +292,7 @@ class project(osv.osv):
             help="Link this project to an analytic account if you need financial management on projects. "
                  "It enables you to connect projects with budgets, planning, cost and revenue analysis, timesheets on projects, etc.",
             ondelete="cascade", required=True, auto_join=True),
+        'label_tasks': fields.char('Use Tasks as', help="Gives label to tasks on project's kanaban view."),
         'members': fields.many2many('res.users', 'project_user_rel', 'project_id', 'uid', 'Project Members',
             help="Project's members are users who can have an access to the tasks related to this project.", states={'close':[('readonly',True)], 'cancelled':[('readonly',True)]}),
         'tasks': fields.one2many('project.task', 'project_id', "Task Activities"),
@@ -347,6 +360,7 @@ class project(osv.osv):
     _defaults = {
         'active': True,
         'type': 'contract',
+        'label_tasks': 'Tasks',
         'state': 'open',
         'sequence': 10,
         'type_ids': _get_type_common,
@@ -490,7 +504,7 @@ class project(osv.osv):
 
         for project in projects:
             if (not project.members) and force_members:
-                raise osv.except_osv(_('Warning!'),_("You must assign members on the project '%s'!") % (project.name,))
+                raise UserError(_("You must assign members on the project '%s'!") % (project.name,))
 
         resource_pool = self.pool.get('resource.resource')
 
@@ -672,12 +686,13 @@ class task(osv.osv):
         search_domain = []
         project_id = self._resolve_project_id_from_context(cr, uid, context=context)
         if project_id:
-            search_domain += ['|', ('project_ids', '=', project_id)]
-        search_domain += [('id', 'in', ids)]
+            search_domain += ['|', ('project_ids', '=', project_id), ('id', 'in', ids)]
+        else:
+            search_domain += ['|', ('id', 'in', ids), ('case_default', '=', True)]
         stage_ids = stage_obj._search(cr, uid, search_domain, order=order, access_rights_uid=access_rights_uid, context=context)
         result = stage_obj.name_get(cr, access_rights_uid, stage_ids, context=context)
         # restore order of the search
-        result.sort(lambda x,y: cmp(stage_ids.index(x[0]), stage_ids.index(y[0])))
+        result.sort(lambda x, y: cmp(stage_ids.index(x[0]), stage_ids.index(y[0])))
 
         fold = {}
         for stage in stage_obj.browse(cr, access_rights_uid, stage_ids, context=context):
@@ -897,7 +912,7 @@ class task(osv.osv):
 
     _constraints = [
         (_check_recursion, 'Error ! You cannot create recursive tasks.', ['parent_ids']),
-        (_check_dates, 'Error ! Task end-date must be greater then task start-date', ['date_start','date_end'])
+        (_check_dates, 'Error ! Task starting date must be lower then its ending date.', ['date_start','date_end'])
     ]
 
     # Override view according to the company definition
@@ -979,7 +994,7 @@ class task(osv.osv):
             if task.child_ids:
                 for child in task.child_ids:
                     if child.stage_id and not child.stage_id.fold:
-                        raise osv.except_osv(_("Warning!"), _("Child task still open.\nPlease cancel or complete child task first."))
+                        raise UserError(_("Child task still open.\nPlease cancel or complete child task first."))
         return True
 
     def _delegate_task_attachments(self, cr, uid, task_id, delegated_task_id, context=None):
@@ -1230,8 +1245,8 @@ class account_analytic_account(osv.osv):
     _inherit = 'account.analytic.account'
     _description = 'Analytic Account'
     _columns = {
-        'use_tasks': fields.boolean('Tasks',help="If checked, this contract will be available in the project menu and you will be able to manage tasks or track issues"),
-        'company_uom_id': fields.related('company_id', 'project_time_mode_id', type='many2one', relation='product.uom'),
+        'use_tasks': fields.boolean('Tasks', help="Check this box to manage internal activities through this project"),
+        'company_uom_id': fields.related('company_id', 'project_time_mode_id', string="Company UOM", type='many2one', relation='product.uom'),
     }
 
     def on_change_template(self, cr, uid, ids, template_id, date_start=False, context=None):
@@ -1288,7 +1303,7 @@ class account_analytic_account(osv.osv):
         proj_ids = self.pool['project.project'].search(cr, uid, [('analytic_account_id', 'in', ids)])
         has_tasks = self.pool['project.task'].search(cr, uid, [('project_id', 'in', proj_ids)], count=True, context=context)
         if has_tasks:
-            raise osv.except_osv(_('Warning!'), _('Please remove existing tasks in the project linked to the accounts you want to delete.'))
+            raise UserError(_('Please remove existing tasks in the project linked to the accounts you want to delete.'))
         return super(account_analytic_account, self).unlink(cr, uid, ids, context=context)
 
     def name_search(self, cr, uid, name, args=None, operator='ilike', context=None, limit=100):
@@ -1415,4 +1430,3 @@ class project_category(osv.osv):
     _columns = {
         'name': fields.char('Name', required=True, translate=True),
     }
-# vim:expandtab:smartindent:tabstop=4:softtabstop=4:shiftwidth=4:

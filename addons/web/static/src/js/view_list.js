@@ -171,7 +171,7 @@ instance.web.ListView = instance.web.View.extend( /** @lends instance.web.ListVi
 
         var context = _.extend({}, record.attributes, {
             uid: this.session.uid,
-            current_date: new Date().toString('yyyy-MM-dd')
+            current_date: moment().format('YYYY-MM-DD')
             // TODO: time, datetime, relativedelta
         });
         var i;
@@ -182,7 +182,7 @@ instance.web.ListView = instance.web.View.extend( /** @lends instance.web.ListVi
                 pair = this.fonts[i];
                 var font = pair[0];
                 expression = pair[1];
-                if (py.evaluate(expression, context).toJSON()) {
+                if (py.PY_isTrue(py.evaluate(expression, context))) {
                     switch(font) {
                     case 'bold':
                         style += 'font-weight: bold;';
@@ -203,7 +203,7 @@ instance.web.ListView = instance.web.View.extend( /** @lends instance.web.ListVi
             pair = this.colors[i];
             var color = pair[0];
             expression = pair[1];
-            if (py.evaluate(expression, context).toJSON()) {
+            if (py.PY_isTrue(py.evaluate(expression, context))) {
                 return style += 'color: ' + color + ';';
             }
             // TODO: handle evaluation errors
@@ -472,9 +472,6 @@ instance.web.ListView = instance.web.View.extend( /** @lends instance.web.ListVi
     },
     do_show: function () {
         this._super();
-        if (this.$buttons) {
-            this.$buttons.show();
-        }
         if (this.$pager) {
             this.$pager.show();
         }
@@ -482,9 +479,6 @@ instance.web.ListView = instance.web.View.extend( /** @lends instance.web.ListVi
     do_hide: function () {
         if (this.sidebar) {
             this.sidebar.$el.hide();
-        }
-        if (this.$buttons) {
-            this.$buttons.hide();
         }
         if (this.$pager) {
             this.$pager.hide();
@@ -511,6 +505,9 @@ instance.web.ListView = instance.web.View.extend( /** @lends instance.web.ListVi
         self.$el.find('.oe_list_record_selector').prop('checked', false);
         this.records.reset();
         var reloaded = $.Deferred();
+        reloaded.then(function () {
+            if (!self.grouped) self.$pager.show();
+        });
         this.$el.find('.oe_list_content').append(
             this.groups.render(function () {
                 if (self.dataset.index == null) {
@@ -535,6 +532,7 @@ instance.web.ListView = instance.web.View.extend( /** @lends instance.web.ListVi
     },
     reload_record: function (record) {
         var self = this;
+        var fields = this.fields_view.fields;
         return this.dataset.read_ids(
             [record.get('id')],
             _.pluck(_(this.columns).filter(function (r) {
@@ -547,8 +545,10 @@ instance.web.ListView = instance.web.View.extend( /** @lends instance.web.ListVi
                 self.records.remove(record);
                 return;
             }
-            _(_.keys(values)).each(function(key){
-                record.set(key, values[key], {silent: true});
+            _.each(values, function (value, key) {
+                if (fields[key] && fields[key].type === 'many2many')
+                    record.set(key + '__display', false, {silent: true});
+                record.set(key, value, {silent: true});            
             });
             record.trigger('change', record);
         });
@@ -897,9 +897,9 @@ instance.web.ListView = instance.web.View.extend( /** @lends instance.web.ListVi
         this.$el.prepend(
             $('<div class="oe_view_nocontent">').html(this.options.action.help)
         );
-        var create_nocontent = this.$buttons;
+        var $buttons = this.$buttons;
         this.$el.find('.oe_view_nocontent').click(function() {
-            create_nocontent.openerpBounce();
+            $buttons.width($buttons.width() + 1).openerpBounce();
         });
     }
 });
@@ -1531,9 +1531,11 @@ instance.web.ListView.Groups = instance.web.Class.extend( /** @lends instance.we
         });
     },
     setup_resequence_rows: function (list, dataset) {
-        // drag and drop enabled if list is not sorted and there is a
-        // visible column with @widget=handle or "sequence" column in the view.
-        if ((dataset.sort && dataset.sort())
+        // drag and drop enabled if list is not sorted (unless it is sorted by
+        // sequence (ASC)), and there is a visible column with @widget=handle
+        // or "sequence" column in the view.
+        if ((dataset.sort && dataset.sort() && dataset.sort() !== 'sequence'
+            && dataset.sort() !== 'sequence ASC')
             || !_(this.columns).any(function (column) {
                     return column.widget === 'handle'
                         || column.name === 'sequence'; })) {
@@ -1605,7 +1607,9 @@ instance.web.ListView.Groups = instance.web.Class.extend( /** @lends instance.we
                 .filter(function (column) { return column.tag === 'field';})
                 .pluck('name').value(),
             function (groups) {
-                self.view.$pager.hide();
+                // page count is irrelevant on grouped page, replace by limit
+                self.view.$pager.find('.oe_pager_group').hide();
+                self.view.$pager.find('.oe_list_pager_state').text(self.view._limit ? self.view._limit : '∞');
                 $el[0].appendChild(
                     self.render_groups(groups));
                 if (post_render) { post_render(); }
@@ -2150,6 +2154,7 @@ instance.web.list.columns = new instance.web.Registry({
     'field.many2onebutton': 'instance.web.list.Many2OneButton',
     'field.reference': 'instance.web.list.Reference',
     'field.many2many': 'instance.web.list.Many2Many',
+    'field.url': 'instance.web.list.Url',
     'button.toggle_button': 'instance.web.list.toggle_button',
 });
 instance.web.list.columns.for_ = function (id, field, node) {
@@ -2225,7 +2230,7 @@ instance.web.list.Column = instance.web.Class.extend({
         }
         if (attrs.invisible) { return ''; }
 
-        if (!row_data[this.id]) {
+        if (!(row_data[this.id] && row_data[this.id].value)) {
             return options.value_if_empty === undefined
                     ? ''
                     : options.value_if_empty;
@@ -2353,7 +2358,7 @@ instance.web.list.Handle = instance.web.list.Column.extend({
      * @private
      */
     _format: function (row_data, options) {
-        return '<div class="oe_list_handle">';
+        return '<i class="oe_list_handle fa fa-circle"/>';
     }
 });
 instance.web.list.Many2OneButton = instance.web.list.Column.extend({
@@ -2385,6 +2390,32 @@ instance.web.list.Reference = instance.web.list.Column.extend({
             } else {
                 row_data[this.id] = {'value': ''};
             }
+        }
+        return this._super(row_data, options);
+    }
+});
+instance.web.list.Url = instance.web.list.Column.extend({
+    /**
+     * Regex checking if a URL has a scheme
+     */
+    PROTOCOL_REGEX: /^(?!\w+:?\/\/)/,
+
+    /**
+     * Format a column as a URL if the column has content.
+     * Add "//" (inherit current protocol) specified in
+     * RFC 1808, 2396, and 3986 if no other protocol is included.
+     *
+     * @param row_data record whose values should be displayed in the cell
+     * @param options
+     */
+    _format: function(row_data, options) {
+        var value = row_data[this.id].value;
+
+        if (value) {
+            return _.template("<a href='<%-href%>' target='_blank'><%-text%></a>", {
+                href: value.trim().replace(this.PROTOCOL_REGEX, '//'),
+                text: value
+            });
         }
         return this._super(row_data, options);
     }

@@ -246,7 +246,7 @@ my.InputView = instance.web.Widget.extend({
             // Read text content (ignore pasted HTML)
             var data = this.$el.text();
             if (!data)
-                return; 
+                return;
             // paste raw text back in
             this.$el.empty().text(data);
             this.el.normalize();
@@ -373,7 +373,7 @@ instance.web.SearchView = instance.web.Widget.extend(/** @lends instance.web.Sea
             disable_custom_filters: false,
         });
         this._super(parent);
-        this.query = undefined;   
+        this.query = undefined;
         this.dataset = dataset;
         this.view_id = view_id;
         this.search_fields = [];
@@ -387,7 +387,8 @@ instance.web.SearchView = instance.web.Widget.extend(/** @lends instance.web.Sea
 
         this.filter_menu = undefined;
         this.groupby_menu = undefined;
-        this.favorite_menu = undefined
+        this.favorite_menu = undefined;
+        this.action_id = this.options && this.options.action && this.options.action.id;
     },    
     start: function() {
         if (this.headless) {
@@ -409,11 +410,12 @@ instance.web.SearchView = instance.web.Widget.extend(/** @lends instance.web.Sea
         this.$('.oe_searchview_unfold_drawer')
             .toggleClass('fa-caret-down', !this.visible_filters)
             .toggleClass('fa-caret-up', this.visible_filters);
-        return this.alive($.when(this._super(), load_view.then(this.view_loaded.bind(this))));
+        return this.alive($.when(this._super(), this.alive(load_view).then(this.view_loaded.bind(this))));
     },
     view_loaded: function (r) {
         var self = this;
         this.fields_view_get = r;
+        this.view_id = this.view_id || r.view_id;
         this.prepare_search_inputs();
         if (this.$buttons) {
 
@@ -423,67 +425,13 @@ instance.web.SearchView = instance.web.Widget.extend(/** @lends instance.web.Sea
 
             this.groupby_menu = new my.GroupByMenu(this, this.groupbys, fields_def);
             this.filter_menu = new my.FilterMenu(this, this.filters, fields_def);
-            this.favorite_menu = new my.FavoriteMenu(this, this.query, this.dataset.model);
+            this.favorite_menu = new my.FavoriteMenu(this, this.query, this.dataset.model, this.action_id);
 
             this.filter_menu.appendTo(this.$buttons);
             this.groupby_menu.appendTo(this.$buttons);
             var custom_filters_ready = this.favorite_menu.appendTo(this.$buttons);
         }
         return $.when(custom_filters_ready).then(this.proxy('set_default_filters'));
-    },
-    // it should parse the arch field of the view, instantiate the corresponding 
-    // filters/fields, and put them in the correct variables:
-    // * this.search_fields is a list of all the fields,
-    // * this.filters: groups of filters
-    // * this.group_by: group_bys
-    prepare_search_inputs: function () {
-        var self = this,
-            arch = this.fields_view_get.arch;
-
-        var filters = [].concat.apply([], _.map(arch.children, function (item) {
-            return item.tag !== 'group' ? eval_item(item) : item.children.map(eval_item);
-        }));
-        function eval_item (item) {
-            var category = 'filters';
-            if (item.attrs.context) {
-                try {
-                    var context = instance.web.pyeval.eval('context', item.attrs.context);
-                    if (context.group_by) {
-                        category = 'group_by';
-                    }                    
-                } catch (e) {}
-            }
-            return {
-                item: item,
-                category: category,
-            }
-        }
-        var current_group = [],
-            current_category = 'filters',
-            categories = {filters: this.filters, group_by: this.groupbys};
-
-        _.each(filters.concat({category:'filters', item: 'separator'}), function (filter) {
-            if (filter.item.tag === 'filter' && filter.category === current_category) {
-                return current_group.push(new my.Filter(filter.item, self));
-            }
-            if (current_group.length) {
-                var group = new my.FilterGroup(current_group, self);
-                categories[current_category].push(group);
-                current_group = [];
-            }
-            if (filter.item.tag === 'field') {
-                var attrs = filter.item.attrs,
-                    field = self.fields_view_get.fields[attrs.name],
-                    Obj = my.fields.get_any([attrs.widget, field.type]);
-                if (Obj) {
-                    self.search_fields.push(new (Obj) (filter.item, field, self));
-                }
-            }
-            if (filter.item.tag === 'filter') {
-                current_group.push(new my.Filter(filter.item, self));
-            }
-            current_category = filter.category;
-        });
     },
     set_default_filters: function () {
         var self = this,
@@ -497,7 +445,7 @@ instance.web.SearchView = instance.web.Widget.extend(/** @lends instance.web.Sea
             return $.when.apply(null, defaults).then(function () {
                 self.query.reset(_(arguments).compact(), {preventSearch: true});
             });
-        } 
+        }
         this.query.reset([], {preventSearch: true});
         return $.when();
     },
@@ -557,10 +505,13 @@ instance.web.SearchView = instance.web.Widget.extend(/** @lends instance.web.Sea
             contexts: contexts,
             groupbys: groupbys,
         };
-    }, 
+    },
     toggle_visibility: function (is_visible) {
         this.$el.toggle(!this.headless && is_visible);
         this.$buttons && this.$buttons.toggle(!this.headless && is_visible && this.visible_filters);
+        if (!this.headless && is_visible) {
+            this.$('div.oe_searchview_input').last().focus();
+        }
     },
     toggle_buttons: function (is_visible) {
         this.visible_filters = is_visible || !this.visible_filters;
@@ -641,7 +592,7 @@ instance.web.SearchView = instance.web.Widget.extend(/** @lends instance.web.Sea
     },
     /**
      * @param {openerp.web.search.SearchQuery | undefined} Undefined if event is change
-     * @param {openerp.web.search.Facet} 
+     * @param {openerp.web.search.Facet}
      * @param {Object} [options]
      */
     renderFacets: function (collection, model, options) {
@@ -695,6 +646,60 @@ instance.web.SearchView = instance.web.Widget.extend(/** @lends instance.web.Sea
      */
     renderChangedFacets: function (model, options) {
         this.renderFacets(undefined, model, options);
+    },
+    // it should parse the arch field of the view, instantiate the corresponding
+    // filters/fields, and put them in the correct variables:
+    // * this.search_fields is a list of all the fields,
+    // * this.filters: groups of filters
+    // * this.group_by: group_bys
+    prepare_search_inputs: function () {
+        var self = this,
+            arch = this.fields_view_get.arch;
+
+        var filters = [].concat.apply([], _.map(arch.children, function (item) {
+            return item.tag !== 'group' ? eval_item(item) : item.children.map(eval_item);
+        }));
+        function eval_item (item) {
+            var category = 'filters';
+            if (item.attrs.context) {
+                try {
+                    var context = instance.web.pyeval.eval('context', item.attrs.context);
+                    if (context.group_by) {
+                        category = 'group_by';
+                    }
+                } catch (e) {}
+            }
+            return {
+                item: item,
+                category: category,
+            };
+        }
+        var current_group = [],
+            current_category = 'filters',
+            categories = {filters: this.filters, group_by: this.groupbys};
+
+        _.each(filters.concat({category:'filters', item: 'separator'}), function (filter) {
+            if (filter.item.tag === 'filter' && filter.category === current_category) {
+                return current_group.push(new my.Filter(filter.item, self));
+            }
+            if (current_group.length) {
+                var group = new my.FilterGroup(current_group, self);
+                categories[current_category].push(group);
+                current_group = [];
+            }
+            if (filter.item.tag === 'field') {
+                var attrs = filter.item.attrs,
+                    field = self.fields_view_get.fields[attrs.name],
+                    Obj = my.fields.get_any([attrs.widget, field.type]);
+                if (Obj) {
+                    self.search_fields.push(new (Obj) (filter.item, field, self));
+                }
+            }
+            if (filter.item.tag === 'filter') {
+                current_group.push(new my.Filter(filter.item, self));
+            }
+            current_category = filter.category;
+        });
     },
 });
 
@@ -1084,7 +1089,7 @@ instance.web.search.Field = instance.web.search.Input.extend( /** @lends instanc
 
         var value_to_domain;
         var self = this;
-        var domain = this.attrs['filter_domain'];
+        var domain = this.attrs.filter_domain;
         if (domain) {
             value_to_domain = function (facetValue) {
                 return new instance.web.CompoundDomain(domain)
@@ -1228,12 +1233,13 @@ instance.web.search.SelectionField = instance.web.search.Field.extend(/** @lends
         var results = _(this.attrs.selection).chain()
             .filter(function (sel) {
                 var value = sel[0], label = sel[1];
-                if (!value) { return false; }
+                if (value === undefined || !label) { return false; }
                 return label.toLowerCase().indexOf(needle.toLowerCase()) !== -1;
             })
             .map(function (sel) {
                 return {
                     label: _.escape(sel[1]),
+                    indent: true,
                     facet: facet_from(self, sel)
                 };
             }).value();
@@ -1272,8 +1278,9 @@ instance.web.search.DateField = instance.web.search.Field.extend(/** @lends inst
         return instance.web.date_to_str(facetValue.get('value'));
     },
     complete: function (needle) {
-        var d = Date.parse(needle);
-        if (!d) { return $.when(null); }
+        var m = moment(needle);
+        if (!m.isValid()) { return $.when(null); }
+        var d = m.toDate();
         var date_string = instance.web.format_value(d, this.attrs);
         var label = _.str.sprintf(_.str.escapeHTML(
             _t("Search %(field)s at: %(value)s")), {
@@ -1387,7 +1394,10 @@ instance.web.search.ManyToOneField = instance.web.search.CharField.extend({
         var values = facet.values;
         if (_.isEmpty(this.attrs.context) && values.length === 1) {
             var c = {};
-            c['default_' + this.attrs.name] = values.at(0).get('value');
+            var v = values.at(0);
+            if (v.get('operator') !== 'ilike') {
+                c['default_' + this.attrs.name] = v.get('value');
+            }
             return c;
         }
         return this._super(facet);
@@ -1441,6 +1451,10 @@ instance.web.search.FilterMenu = instance.web.Widget.extend({
             prop.$el.hide();
         });
     },
+    update_max_height: function () {
+        var max_height = $(window).height() - this.$menu[0].getBoundingClientRect().top - 10;
+        this.$menu.css('max-height', max_height);
+    },
     toggle_custom_filter_menu: function (is_open) {
         this.$add_filter
             .toggleClass('closed-menu', !is_open)
@@ -1450,6 +1464,7 @@ instance.web.search.FilterMenu = instance.web.Widget.extend({
             this.append_proposition();
         }
         this.$('.oe-filter-condition').toggle(is_open);
+        this.update_max_height();
     },
     append_proposition: function () {
         var self = this;
@@ -1458,6 +1473,7 @@ instance.web.search.FilterMenu = instance.web.Widget.extend({
             self.propositions.push(prop);
             prop.insertBefore(self.$add_filter_menu);
             self.$apply_filter.prop('disabled', false);
+            self.update_max_height();
             return prop;
         });
     },
@@ -1526,7 +1542,7 @@ instance.web.search.GroupByMenu = instance.web.Widget.extend({
                 self.toggle_add_menu(false);
                 var field = self.$group_selector.find(':selected').data('name');
                 self.add_groupby_to_menu(field);
-            });            
+            });
         });
     },
     get_groupable_fields: function (fields) {
@@ -1570,11 +1586,9 @@ instance.web.search.FavoriteMenu = instance.web.Widget.extend({
             this.toggle_save_menu();
         },
         'click .oe-save-name button': 'save_favorite',
-        'hidden.bs.dropdown': function () {
-            this.close_menus();
-        },
+        'hidden.bs.dropdown': 'close_menus',
     },
-    init: function (parent, query, target_model) {
+    init: function (parent, query, target_model, action_id) {
         this._super.apply(this,arguments);
         this.searchview = parent;
         this.query = query;
@@ -1582,8 +1596,7 @@ instance.web.search.FavoriteMenu = instance.web.Widget.extend({
         this.model = new instance.web.Model('ir.filters');
         this.filters = {};
         this.$filters = {};
-        var action = instance.client.action_manager.inner_action;
-        this.action_id = action && action.id;
+        this.action_id = action_id;
     },
     start: function () {
         var self = this;
@@ -1604,6 +1617,10 @@ instance.web.search.FavoriteMenu = instance.web.Widget.extend({
                 }
             })
             .on('reset', this.proxy('clear_selection'));
+        if (!this.action_id) {
+            this.prepare_dropdown_menu([]);
+            return $.when();
+        }
         return this.model.call('get_filters', [this.target_model, this.action_id])
             .done(this.proxy('prepare_dropdown_menu'));
     },
@@ -1632,10 +1649,21 @@ instance.web.search.FavoriteMenu = instance.web.Widget.extend({
             this.$inputs.first().focus();
             return;
         }
+        if (_.chain(this.filters)
+                .pluck('name')
+                .contains(filter_name).value()) {
+            this.do_warn(_t("Error"), _t("Filter with same name already exists."));
+            this.$inputs.first().focus();
+            return;            
+        }
         var search = this.searchview.build_search_data(),
+            view_manager = this.findAncestor(function (a) {
+                return a instanceof instance.web.ViewManager
+            }),
+            view_context = view_manager ? view_manager.active_view.controller.get_context() : {},
             results = instance.web.pyeval.sync_eval_domains_and_contexts({
                 domains: search.domains,
-                contexts: search.contexts,
+                contexts: search.contexts.concat(view_context || []),
                 group_by_seq: search.groupbys || [],
             });
         if (!_.isEmpty(results.group_by)) {
@@ -1725,8 +1753,7 @@ instance.web.search.FavoriteMenu = instance.web.Widget.extend({
     append_filter: function (filter) {
         var self = this,
             key = this.key_for(filter),
-            $filter,
-            warning = _t("This filter is global and will be removed for everybody if you continue.");
+            $filter;
 
         this.$divider.show();
         if (key in this.$filters) {
@@ -1742,9 +1769,9 @@ instance.web.search.FavoriteMenu = instance.web.Widget.extend({
             this.$filters[key].addClass(filter.user_id ? 'oe_searchview_custom_private'
                                          : 'oe_searchview_custom_public')
             $('<span>')
-                .addClass('fa fa-trash-o')
+                .addClass('fa fa-trash-o remove-filter')
                 .click(function (event) {
-                    event.stopImmediatePropagation(); 
+                    event.stopImmediatePropagation();
                     self.remove_filter(filter, $filter, key);
                 })
                 .appendTo($filter);
@@ -1768,8 +1795,9 @@ instance.web.search.FavoriteMenu = instance.web.Widget.extend({
     },
     remove_filter: function (filter, $filter, key) {
         var self = this;
-        var warning = _t("This filter is global and will be removed for everybody if you continue.");
-        if (!(filter.user_id || confirm(warning))) {
+        var global_warning = _t("This filter is global and will be removed for everybody if you continue."),
+            warning = _t("Are you sure that you want to remove this filter?");
+        if (!confirm(filter.user_id ? warning : global_warning)) {
             return;
         }
         this.model.call('unlink', [filter.id]).done(function () {
@@ -1777,9 +1805,9 @@ instance.web.search.FavoriteMenu = instance.web.Widget.extend({
             delete self.$filters[key];
             delete self.filters[key];
             if (_.isEmpty(self.filters)) {
-                self.$('li.divider').remove();
+                self.$divider.hide();
             }
-        });        
+        });
     },
 });
 
@@ -2117,6 +2145,14 @@ instance.web.search.AutoComplete = instance.web.Widget.extend({
                 ev.preventDefault();
                 return;
             }
+            // ENTER is caugth at KeyUp rather than KeyDown to avoid firing
+            // before all regular keystrokes have been processed
+            if (ev.which === $.ui.keyCode.ENTER) {
+                if (self.current_result && self.get_search_string().length) {
+                    self.select_item(ev);
+                }
+                return;
+            }
             if (!self.searching) {
                 self.searching = true;
                 return;
@@ -2131,8 +2167,10 @@ instance.web.search.AutoComplete = instance.web.Widget.extend({
         });
         this.$input.on('keydown', function (ev) {
             switch (ev.which) {
+                // TAB and direction keys are handled at KeyDown because KeyUp
+                // is not guaranteed to fire.
+                // See e.g. https://github.com/aef-/jquery.masterblaster/issues/13
                 case $.ui.keyCode.TAB:
-                case $.ui.keyCode.ENTER:
                     if (self.current_result && self.get_search_string().length) {
                         self.select_item(ev);
                     }
@@ -2285,5 +2323,3 @@ instance.web.search.AutoComplete = instance.web.Widget.extend({
 });
 
 })();
-
-// vim:et fdc=0 fdl=0 foldnestmax=3 fdm=syntax:

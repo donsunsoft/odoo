@@ -9,11 +9,10 @@ if (!instance.board) {
 
 instance.web.form.DashBoard = instance.web.form.FormWidget.extend({
     events: {
-        'click .oe_dashboard_link_reset': 'on_reset',
         'click .oe_dashboard_link_change_layout': 'on_change_layout',
         'click h2.oe_header span.oe_header_txt': function (ev) {
             if(ev.target === ev.currentTarget)
-                self.on_header_string($(ev.target).parent());
+                this.on_header_string($(ev.target).parent());
         },
         'click .oe_dashboard_column .oe_fold': 'on_fold_action',
         'click .oe_dashboard_column .oe_close': 'on_close_action',
@@ -27,6 +26,7 @@ instance.web.form.DashBoard = instance.web.form.FormWidget.extend({
     start: function() {
         var self = this;
         this._super.apply(this, arguments);
+        this.$el.addClass('o-dashboard');
 
         this.$('.oe_dashboard_column').sortable({
             connectWith: '.oe_dashboard_column',
@@ -77,12 +77,6 @@ instance.web.form.DashBoard = instance.web.form.FormWidget.extend({
                 span.show();
             }
         });
-    },
-    on_reset: function() {
-        this.rpc('/web/view/undo_custom', {
-            view_id: this.view.fields_view.view_id,
-            reset: true
-        }).done(this.do_reload);
     },
     on_change_layout: function() {
         var self = this;
@@ -377,6 +371,7 @@ instance.web.search.FavoriteMenu.include({
         context.add({
             group_by: instance.web.pyeval.eval('groupbys', data.groupbys || [])
         });
+        context.add(view_manager.active_view.controller.get_context());
         var c = instance.web.pyeval.eval('context', context);
         for(var k in c) {
             if (c.hasOwnProperty(k) && /^search_default_/.test(k)) {

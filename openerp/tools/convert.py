@@ -26,41 +26,30 @@ import os.path
 import pickle
 import re
 import sys
-
-# for eval context:
 import time
+
+from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
+
+import pytz
+from lxml import etree, builder
 
 import openerp
 import openerp.release
 import openerp.workflow
-from yaml_import import convert_yaml_import
 
 import assertion_report
-
-_logger = logging.getLogger(__name__)
-
-try:
-    import pytz
-except:
-    _logger.warning('could not find pytz library, please install it')
-    class pytzclass(object):
-        all_timezones=[]
-    pytz=pytzclass()
-
-
-from datetime import datetime, timedelta
-from dateutil.relativedelta import relativedelta
-from lxml import etree, builder
 import misc
-from config import config
-from translate import _
 
+from config import config
 # List of etree._Element subclasses that we choose to ignore when parsing XML.
 from misc import SKIPPED_ELEMENT_TYPES
-
 from misc import unquote
-
 from openerp import SUPERUSER_ID
+from translate import _
+from yaml_import import convert_yaml_import
+
+_logger = logging.getLogger(__name__)
 
 # Import of XML records requires the unsafe eval as well,
 # almost everywhere, which is ok because it supposedly comes
@@ -232,11 +221,8 @@ def _eval_xml(self, node, pool, cr, uid, idref, context=None):
     elif node.tag == "test":
         return node.text
 
-escape_re = re.compile(r'(?<!\\)/')
-def escape(x):
-    return x.replace('\\/', '/')
-
 class xml_import(object):
+
     @staticmethod
     def nodeattr2bool(node, attr, default=False):
         if not node.get(attr):
@@ -356,6 +342,10 @@ form: module.record_id""" % (xml_id,)
                     group_id = self.id_get(cr, group)
                     groups_value.append((4, group_id))
             res['groups_id'] = groups_value
+        if rec.get('paperformat'):
+            pf_name = rec.get('paperformat')
+            pf_id = self.id_get(cr,pf_name)
+            res['paperformat_id'] = pf_id
 
         id = self.pool['ir.model.data']._update(cr, self.uid, "ir.actions.report.xml", self.module, res, xml_id, noupdate=self.isnoupdate(data_node), mode=self.mode)
         self.idref[xml_id] = int(id)
@@ -363,12 +353,13 @@ form: module.record_id""" % (xml_id,)
         if not rec.get('menu') or eval(rec.get('menu','False')):
             keyword = str(rec.get('keyword', 'client_print_multi'))
             value = 'ir.actions.report.xml,'+str(id)
-            replace = rec.get('replace', True)
-            self.pool['ir.model.data'].ir_set(cr, self.uid, 'action', keyword, res['name'], [res['model']], value, replace=replace, isobject=True, xml_id=xml_id)
+            ir_values_id = self.pool['ir.values'].set_action(cr, self.uid, res['name'], keyword, res['model'], value)
+            self.pool['ir.actions.report.xml'].write(cr, self.uid, id, {'ir_values_id': ir_values_id})
         elif self.mode=='update' and eval(rec.get('menu','False'))==False:
             # Special check for report having attribute menu=False on update
             value = 'ir.actions.report.xml,'+str(id)
             self._remove_ir_values(cr, res['name'], value, res['model'])
+            self.pool['ir.actions.report.xml'].write(cr, self.uid, id, {'ir_values_id': False})
         return id
 
     def _tag_function(self, cr, rec, data_node=None, mode=None):
@@ -378,18 +369,6 @@ form: module.record_id""" % (xml_id,)
         uid = self.get_uid(cr, self.uid, data_node, rec)
         _eval_xml(self,rec, self.pool, cr, uid, self.idref, context=context)
         return
-
-    def _tag_url(self, cr, rec, data_node=None, mode=None):
-        url = rec.get("url",'').encode('utf8')
-        target = rec.get("target",'').encode('utf8')
-        name = rec.get("name",'').encode('utf8')
-        xml_id = rec.get('id','').encode('utf8')
-        self._test_xml_id(xml_id)
-
-        res = {'name': name, 'url': url, 'target':target}
-
-        id = self.pool['ir.model.data']._update(cr, self.uid, "ir.actions.act_url", self.module, res, xml_id, noupdate=self.isnoupdate(data_node), mode=self.mode)
-        self.idref[xml_id] = int(id)
 
     def _tag_act_window(self, cr, rec, data_node=None, mode=None):
         name = rec.get('name','').encode('utf-8')
@@ -528,55 +507,25 @@ form: module.record_id""" % (xml_id,)
         openerp.workflow.trg_validate(
             uid, model, id, rec.get('action').encode('ascii'), cr)
 
-    #
-    # Support two types of notation:
-    #   name="Inventory Control/Sending Goods"
-    # or
-    #   action="action_id"
-    #   parent="parent_id"
-    #
     def _tag_menuitem(self, cr, rec, data_node=None, mode=None):
         rec_id = rec.get("id",'').encode('ascii')
         self._test_xml_id(rec_id)
-        m_l = map(escape, escape_re.split(rec.get("name",'').encode('utf8')))
 
-        values = {'parent_id': False}
-        if rec.get('parent', False) is False and len(m_l) > 1:
-            # No parent attribute specified and the menu name has several menu components,
-            # try to determine the ID of the parent according to menu path
-            pid = False
-            res = None
-            values['name'] = m_l[-1]
-            m_l = m_l[:-1] # last part is our name, not a parent
-            for idx, menu_elem in enumerate(m_l):
-                if pid:
-                    cr.execute('select id from ir_ui_menu where parent_id=%s and name=%s', (pid, menu_elem))
-                else:
-                    cr.execute('select id from ir_ui_menu where parent_id is null and name=%s', (menu_elem,))
-                res = cr.fetchone()
-                if res:
-                    pid = res[0]
-                else:
-                    # the menuitem does't exist but we are in branch (not a leaf)
-                    _logger.warning('Warning no ID for submenu %s of menu %s !', menu_elem, str(m_l))
-                    pid = self.pool['ir.ui.menu'].create(cr, self.uid, {'parent_id' : pid, 'name' : menu_elem})
-            values['parent_id'] = pid
+        # The parent attribute was specified, if non-empty determine its ID, otherwise
+        # explicitly make a top-level menu
+        if rec.get('parent'):
+            menu_parent_id = self.id_get(cr, rec.get('parent',''))
         else:
-            # The parent attribute was specified, if non-empty determine its ID, otherwise
-            # explicitly make a top-level menu
-            if rec.get('parent'):
-                menu_parent_id = self.id_get(cr, rec.get('parent',''))
-            else:
-                # we get here with <menuitem parent="">, explicit clear of parent, or
-                # if no parent attribute at all but menu name is not a menu path
-                menu_parent_id = False
-            values = {'parent_id': menu_parent_id}
-            if rec.get('name'):
-                values['name'] = rec.get('name')
-            try:
-                res = [ self.id_get(cr, rec.get('id','')) ]
-            except:
-                res = None
+            # we get here with <menuitem parent="">, explicit clear of parent, or
+            # if no parent attribute at all but menu name is not a menu path
+            menu_parent_id = False
+        values = {'parent_id': menu_parent_id}
+        if rec.get('name'):
+            values['name'] = rec.get('name')
+        try:
+            res = [ self.id_get(cr, rec.get('id','')) ]
+        except:
+            res = None
 
         if rec.get('action'):
             a_action = rec.get('action','').encode('utf8')
@@ -735,8 +684,8 @@ form: module.record_id""" % (xml_id,)
             f_ref = field.get("ref",'').encode('utf-8')
             f_search = field.get("search",'').encode('utf-8')
             f_model = field.get("model",'').encode('utf-8')
-            if not f_model and model._all_columns.get(f_name):
-                f_model = model._all_columns[f_name].column._obj
+            if not f_model and f_name in model._fields:
+                f_model = model._fields[f_name].comodel_name
             f_use = field.get("use",'').encode('utf-8') or 'id'
             f_val = False
 
@@ -747,26 +696,24 @@ form: module.record_id""" % (xml_id,)
                 # browse the objects searched
                 s = f_obj.browse(cr, self.uid, f_obj.search(cr, self.uid, q))
                 # column definitions of the "local" object
-                _cols = self.pool[rec_model]._all_columns
+                _fields = self.pool[rec_model]._fields
                 # if the current field is many2many
-                if (f_name in _cols) and _cols[f_name].column._type=='many2many':
+                if (f_name in _fields) and _fields[f_name].type == 'many2many':
                     f_val = [(6, 0, map(lambda x: x[f_use], s))]
                 elif len(s):
                     # otherwise (we are probably in a many2one field),
                     # take the first element of the search
                     f_val = s[0][f_use]
             elif f_ref:
-                if f_name in model._all_columns \
-                          and model._all_columns[f_name].column._type == 'reference':
+                if f_name in model._fields and model._fields[f_name].type == 'reference':
                     val = self.model_id_get(cr, f_ref)
                     f_val = val[0] + ',' + str(val[1])
                 else:
                     f_val = self.id_get(cr, f_ref)
             else:
                 f_val = _eval_xml(self,field, self.pool, cr, self.uid, self.idref)
-                if f_name in model._all_columns:
-                    import openerp.osv as osv
-                    if isinstance(model._all_columns[f_name].column, osv.fields.integer):
+                if f_name in model._fields:
+                    if model._fields[f_name].type == 'integer':
                         f_val = int(f_val)
             res[f_name] = f_val
 
@@ -809,8 +756,14 @@ form: module.record_id""" % (xml_id,)
         record.append(Field(el.get('priority', "16"), name='priority'))
         if 'inherit_id' in el.attrib:
             record.append(Field(name='inherit_id', ref=el.get('inherit_id')))
-        if el.get('active') in ("True", "False") and mode != "update":
-            record.append(Field(name='active', eval=el.get('active')))
+        if 'website_id' in el.attrib:
+            record.append(Field(name='website_id', ref=el.get('website_id')))
+        if 'key' in el.attrib:
+            record.append(Field(el.get('key'), name='key'))
+        if el.get('active') in ("True", "False"):
+            view_id = self.id_get(cr, tpl_id, raise_if_not_found=False)
+            if mode != "update" or not view_id:
+                record.append(Field(name='active', eval=el.get('active')))
         if el.get('customize_show') in ("True", "False"):
             record.append(Field(name='customize_show', eval=el.get('customize_show')))
         groups = el.attrib.pop('groups', None)
@@ -835,33 +788,36 @@ form: module.record_id""" % (xml_id,)
 
         return self._tag_record(cr, record, data_node)
 
-    def id_get(self, cr, id_str):
+    def id_get(self, cr, id_str, raise_if_not_found=True):
         if id_str in self.idref:
             return self.idref[id_str]
-        res = self.model_id_get(cr, id_str)
+        res = self.model_id_get(cr, id_str, raise_if_not_found)
         if res and len(res)>1: res = res[1]
         return res
 
-    def model_id_get(self, cr, id_str):
+    def model_id_get(self, cr, id_str, raise_if_not_found=True):
         model_data_obj = self.pool['ir.model.data']
         mod = self.module
-        if '.' in id_str:
-            mod,id_str = id_str.split('.')
-        return model_data_obj.get_object_reference(cr, self.uid, mod, id_str)
+        if '.' not in id_str:
+            id_str = '%s.%s' % (mod, id_str)
+        return model_data_obj.xmlid_to_res_model_res_id(
+            cr, self.uid, id_str,
+            raise_if_not_found=raise_if_not_found)
 
     def parse(self, de, mode=None):
-        if de.tag != 'openerp':
-            raise Exception("Mismatch xml format: root tag must be `openerp`.")
-
-        for n in de.findall('./data'):
-            for rec in n:
-                if rec.tag in self._tags:
-                    try:
-                        self._tags[rec.tag](self.cr, rec, n, mode=mode)
-                    except Exception, e:
-                        self.cr.rollback()
-                        exc_info = sys.exc_info()
-                        raise ParseError, (misc.ustr(e), etree.tostring(rec).rstrip(), rec.getroottree().docinfo.URL, rec.sourceline), exc_info[2]
+        roots = ['openerp','data','odoo']
+        if de.tag not in roots:
+            raise Exception("Root xml tag must be <openerp>, <odoo> or <data>.")
+        for rec in de:
+            if rec.tag in roots:
+                self.parse(rec, mode)
+            elif rec.tag in self._tags:
+                try:
+                    self._tags[rec.tag](self.cr, rec, de, mode=mode)
+                except Exception, e:
+                    self.cr.rollback()
+                    exc_info = sys.exc_info()
+                    raise ParseError, (misc.ustr(e), etree.tostring(rec).rstrip(), rec.getroottree().docinfo.URL, rec.sourceline), exc_info[2]
         return True
 
     def __init__(self, cr, module, idref, mode, report=None, noupdate=False, xml_filename=None):
@@ -885,10 +841,8 @@ form: module.record_id""" % (xml_id,)
             'template': self._tag_template,
             'workflow': self._tag_workflow,
             'report': self._tag_report,
-
             'ir_set': self._tag_ir_set,
             'act_window': self._tag_act_window,
-            'url': self._tag_url,
             'assert': self._tag_assert,
         }
 
@@ -910,7 +864,7 @@ def convert_file(cr, module, filename, idref, mode='update', noupdate=False, kin
         elif ext == '.js':
             pass # .js files are valid but ignored here.
         else:
-            _logger.warning("Can't load unknown file type %s.", filename)
+            raise ValueError("Can't load unknown file type %s.", filename)
     finally:
         fp.close()
 
@@ -975,9 +929,6 @@ def convert_csv_import(cr, module, fname, csvcontent, idref=None, mode='init',
         pickle.dump(data, file(config.get('import_partial'),'wb'))
         cr.commit()
 
-#
-# xml import/export
-#
 def convert_xml_import(cr, module, xmlfile, idref=None, mode='init', noupdate=False, report=None):
     doc = etree.parse(xmlfile)
     relaxng = etree.RelaxNG(
@@ -985,8 +936,8 @@ def convert_xml_import(cr, module, xmlfile, idref=None, mode='init', noupdate=Fa
     try:
         relaxng.assert_(doc)
     except Exception:
-        _logger.error('The XML file does not fit the required schema !')
-        _logger.error(misc.ustr(relaxng.error_log.last_error))
+        _logger.info('The XML file does not fit the required schema !', exc_info=True)
+        _logger.info(misc.ustr(relaxng.error_log.last_error))
         raise
 
     if idref is None:
@@ -998,6 +949,3 @@ def convert_xml_import(cr, module, xmlfile, idref=None, mode='init', noupdate=Fa
     obj = xml_import(cr, module, idref, mode, report=report, noupdate=noupdate, xml_filename=xml_filename)
     obj.parse(doc.getroot(), mode=mode)
     return True
-
-
-# vim:expandtab:smartindent:tabstop=4:softtabstop=4:shiftwidth=4:
